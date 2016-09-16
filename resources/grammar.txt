@@ -1,0 +1,75 @@
+S = SELECT
+SELECT = (<'SELECT' WS> FIELD_LIST
+          [WS FROM]
+          [WS GROUP_BY]
+          [WS ORDER_BY]
+          [WS LIMIT]
+         )
+FROM = <'FROM' WS> (VIEW | JOIN)
+GROUP_BY = <'GROUP' WS 'BY' WS> ARG_OR_IDX_LIST
+ORDER_BY = <'ORDER' WS 'BY' WS> ARG_OR_IDX_LIST
+WHERE = <'WHERE' WS> ARG_LIST
+LIMIT = <'LIMIT' WS> VIEW
+
+JOIN = VIEW (WS JOIN_STATEMENT)+
+<JOIN_STATEMENT> = CROSS_JOIN | ON_JOIN
+CROSS_JOIN = <'CROSS' WS 'JOIN'> VIEW
+ON_JOIN = [JOIN_DIRECTION WS] [JOIN_STRAT WS] <'JOIN' WS> VIEW WS ON
+JOIN_DIRECTION = (LEFT | RIGHT)
+JOIN_STRAT = (INNER | OUTER)
+LEFT = <'LEFT'>
+RIGHT = <'RIGHT'>
+INNER = <'INNER'>
+OUTER = <'OUTER'>
+
+ON = <'ON' WS> EXPRESSION
+
+FIELD_LIST = (FIELD_OR_GLOB <WS ',' WS>)* WS FIELD_OR_GLOB
+<FIELD_OR_GLOB> = GLOB | FIELD
+GLOB = ((NAME '.')* '*')
+<ARG_LIST> = (FIELD <WS ',' WS>)* FIELD
+<ARG_OR_IDX_LIST> = (IDENTIFIER_OR_IDX <WS ',' WS>)* WS IDENTIFIER_OR_IDX
+<IDENTIFIER_OR_IDX> = IDENTIFIER | INTEGER
+FIELD = EXPRESSION [WS ALIAS]
+
+ALIAS = <'AS' WS> NAME
+
+VIEW = (IDENTIFIER | (<'('> WS SELECT WS <')'>)) [WS ALIAS]
+
+IDENTIFIER = (NAME <'.'>)* NAME
+<NAME> = #'\w+' | #'"[\w\.]+"'
+
+EXPRESSION = EXPRESSION_
+(* alias EXPRESSION_ to hide it and give parens precedence
+   w/o polluting parse tree *)
+<EXPRESSION_> = (
+             <'(' WS> EXPRESSION_ <')' WS>                 |
+             BIN_OP_CALL                                   |
+             FUNCTION_CALL                                 |
+             NOT_EXPRESSION                                |
+             CASE_WHEN                                     |
+             IDENTIFIER                                    |
+             CASE_WHEN                                     |
+             LITERAL
+           )
+
+BIN_OP_CALL = (EXPRESSION WS BIN_OP WS EXPRESSION)
+FUNCTION_CALL = FUNCTION <WS '(' WS> ARG_LIST <')' WS>
+NOT_EXPRESSION = NOT WS EXPRESSION
+CASE_WHEN = (<'CASE' WS 'WHEN' WS> EXPRESSION
+                  <WS 'THEN' WS> EXPRESSION
+                  <WS 'ELSE' WS> EXPRESSION
+             <WS 'END'>)
+LITERAL = STRING | INTEGER | FLOAT | NULL
+NULL = 'NULL'
+NOT = 'NOT'
+FUNCTION = #'\w+'
+BIN_OP = ('+' | '-' | '*' | '/' |
+          'OR' | 'AND' | 'IS' |
+          '=' | '<' | '<=' | '>' | '>='
+         )
+STRING = #"'[^']*'"
+INTEGER = #'\d+'
+FLOAT = #'\d+\.(?:\d+)?'
+
+<WS> = <#'\s*'>

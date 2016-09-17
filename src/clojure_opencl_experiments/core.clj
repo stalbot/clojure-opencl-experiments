@@ -97,7 +97,7 @@
         ctxt-with-row (assoc parse-context
                         :row-sym row-sym
                         :context :field-list)
-        visited-globs (map #(visit [% ctxt-with-row]) GLOB)
+        visited-globs (mapcat #(visit [% ctxt-with-row]) GLOB)
         visited-fields (map #(visit [% ctxt-with-row]) FIELD)
         all-new-fields (concat visited-globs visited-fields)
         selected-field-code (into {}
@@ -123,7 +123,23 @@
         field-name (if alias-ctxt
                      (:field-name alias-ctxt)
                      (:field-name expr-ctxt))]
-    [expr (assoc parse-context :field-name field-name)]))
+    [expr (assoc expr-ctxt :field-name field-name)]))
+
+(defmethod visit :GLOB [[[_ & qualifiers] parse-context]]
+  ; this method violates the visit contract for convenience ->
+  ; returns a sequence of the tuple you'd normally expect from visit()
+  ; TODO maybe change this
+  (let [qualification-reg (re-pattern
+                            (str "^(?:\\w+\\.)*"
+                                 (string/join "\\." qualifiers)))
+        row-sym (:row-sym parse-context)
+        binding (:binding parse-context)]
+    (map
+      (fn [[field-name field-type]]
+        [`(~field-name ~row-sym), (assoc parse-context
+                                    :field-name field-name
+                                    :type field-type)])
+      (filter #(re-find qualification-reg (name (first %))) binding))))
 
 (defn update! [tmap key func & args]
   (assoc! tmap key (apply func (get tmap key) args)))
@@ -189,6 +205,7 @@
     [nil (assoc parse-context key-name (keyword (first args)))]))
 
 (defmethod visit :JOIN [[[_ & args] parse-context]])
+
 
 (defmethod visit :ON_JOIN [[[_ & args] parse-context]])
 
@@ -320,7 +337,6 @@
     (let [field-name (keyword (str/join "." args))
           row-sym (:row-sym parse-context)
           field-name-in-ctxt (fully-qualified-name field-name parse-context)
-          _ (println field-name-in-ctxt)
           type (get-in parse-context [:binding field-name-in-ctxt])]
       [`(~field-name-in-ctxt ~row-sym),
        (assoc parse-context

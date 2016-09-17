@@ -55,7 +55,7 @@
           {:id 2, :name "george", :value -231.232}]))
 
 
-(deftest select-from-tests
+(deftest select-from-table-tests
   (is (= (all-vals "select 1 as val from memory_test.bar")
          [{:val 1} {:val 1}]))
   (is (= (all-vals "select name as thing, id + 6 as i from memory_test.bar")
@@ -66,10 +66,19 @@
   (is (= (all-vals "select name from memory_test.bar as baz")
          [{:name "bob"} {:name "george"}]))
   (is (= (all-vals "select name from memory_test.bar")
-       [{:name "bob"} {:name "george"}])))
+         [{:name "bob"} {:name "george"}]))
+  (is (= (all-vals "select * from memory_test.bar")
+         [{:memory_test.bar.id 1, :memory_test.bar.name "bob", :memory_test.bar.value 3.14}
+          {:memory_test.bar.id 2, :memory_test.bar.name "george", :memory_test.bar.value -231.232}]))
+  (is (= (all-vals "select memory_test.bar.* from memory_test.bar")
+         [{:memory_test.bar.id 1, :memory_test.bar.name "bob", :memory_test.bar.value 3.14}
+          {:memory_test.bar.id 2, :memory_test.bar.name "george", :memory_test.bar.value -231.232}]))
+  (is (= (all-vals "select bar.* from memory_test.bar")
+         [{:memory_test.bar.id 1, :memory_test.bar.name "bob", :memory_test.bar.value 3.14}
+          {:memory_test.bar.id 2, :memory_test.bar.name "george", :memory_test.bar.value -231.232}])))
 
-;(deftest blah
-;  (is
-;    (clojure.core/map
-;      (clojure.core/fn [G__18558] {:val 1})
-;      (clojure-opencl-experiments.core/load-qualified-view '("memory_test" "bar")))))
+(deftest select-from-inline-dt-tests
+  (is (= (all-vals "select * from (select 1 as foo) as baz")
+         [{:foo 1}]))
+  (is (= (all-vals "select baz.foo + 1.2 as bar from (select 2 as foo) as baz")
+         [{:bar 3.2}])))

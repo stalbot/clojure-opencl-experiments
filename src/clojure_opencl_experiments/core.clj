@@ -1,8 +1,9 @@
 (ns clojure-opencl-experiments.core
   (:require [instaparse.core :as insta]
-            ;[uncomplicate.clojurecl [core :refer :all]
-            ; [info :refer :all]]
-            [clojure.string :as str]))
+    ;[uncomplicate.clojurecl [core :refer :all]
+    ; [info :refer :all]]
+            [clojure.string :as str]
+            [clojure.string :as string]))
 
 (def ^:const grammar-s
   (slurp "resources/grammar.txt"))
@@ -11,6 +12,8 @@
   ; convenience -> every keyword can be upper/lower, let's not
   ; write all that nonsense in the parser since we're rolling w/o a lexer
   (str/replace grammar-s #"'([A-Z_]+)'" "#'(?i)$1'"))
+
+(def binding-map {})
 
 (def parser (insta/parser (decap-grammar-s grammar-s)))
 
@@ -31,8 +34,7 @@
         by-key (into {} (for [[key & _ :as node] args] [key node]))
 
         [from-code from-context] (visit [(:FROM by-key) parse-context])
-        binding (binding-from-context from-context)
-        bound-context (assoc parse-context :binding binding)
+        bound-context from-context
 
         [field-code field-context] (visit [(:FIELD_LIST by-key) bound-context])
         new-binding (binding-from-context field-context)
@@ -104,7 +106,7 @@
                                       [(:field-name ctxt) code])
                                     all-new-fields))
         code `(fn [~row-sym] ~selected-field-code)
-        new-binding (into {}
+        new-binding (into binding-map
                           (map
                             (fn [[_ ctxt]]
                               [(:field-name ctxt) (:type ctxt)])
@@ -169,22 +171,14 @@
 (defmethod visit :VIEW [[[_ & args] parse-context]]
   (let [visit #(visit [% parse-context])
         [[data-code data-ctxt] [_ alias-ctxt]] (map visit args)
-        view-binding (:binding data-ctxt)
         alias-name (:view-name alias-ctxt)
         original-name (:view-name data-ctxt)
-        view-replace-reg (re-pattern (str "^" original-name))
-        new-binding (if alias-name
-                      (into
-                        {}
-                        (map
-                          (fn [[col-name type]]
-                            [(str/replace col-name view-replace-reg alias-name)
-                             type])
-                          view-binding))
-                      view-binding)]
+        parse-context (assoc parse-context :binding (:binding data-ctxt))]
     (when-not (or original-name alias-name)
       (throw (RuntimeException. "TODO every derived table blah blah alias")))
-    [data-code (assoc parse-context :binding new-binding)]))
+    [data-code (assoc-in parse-context
+                       [:aliased-views alias-name]
+                       original-name)]))
 
 (defmethod visit :ALIAS [[[_ & args] parse-context]]
   ; deliberately do not worry about \"s in the parse ->
@@ -258,20 +252,81 @@
 (defn load-qualified-view [view-path]
   (load-view (lookup-view view-path)))
 
+(defn- qualify-keys-for-view [view-name row]
+  (persistent!
+    (reduce-kv
+      (fn [new-row k v]
+        (assoc! new-row (keyword (str view-name "." (name k))) v))
+      (transient {})
+      row)))
+
+(defn qualify-binding-for-view [fully-qualified-view binding]
+  (qualify-keys-for-view (name fully-qualified-view) binding))
+
+(defn qualify-data-for-view [fully-qualified-view data]
+  (let [view-name (name fully-qualified-view)]
+    (mapv
+      #(qualify-keys-for-view view-name %)
+      data)))
+
 (defn binding-from-qualified-view [view-path]
   (let [view (lookup-view view-path)]
     (if view
       (:binding view)
       (throw (RuntimeException. "TODO bad view")))))
 
+(defn- binding-by-name* [binding]
+  (reduce
+    (fn [new-b [k _]]
+      (let [split-key (string/split (name k) #"\.")]
+        (reduce
+          #(update %1 (string/join "." (take-last %2 split-key)) conj k)
+          new-b
+          (range 1 (+ 1 (count split-key))))))
+    {}
+    binding))
+
+(def binding-by-name
+  (memoize binding-by-name*))
+
+(defn fully-qualified-name [field-name parse-context]
+  (let [elements (-> field-name name (string/split #"\."))
+        aliased-views (:aliased-views parse-context)
+        name-lkup (binding-by-name (:binding parse-context))]
+    (or
+      (reduce
+        (fn [_ idx]
+          (let [front (str/join "." (take (+ 1 idx) elements))
+                back (str/join "." (drop idx elements))
+                resolved-alias (get aliased-views front)]
+            (if resolved-alias
+              (reduced
+                (keyword (string/join "." [resolved-alias back])))
+              (let [matching-cols (get name-lkup back)
+                    matching-cols-count (count matching-cols)]
+                (cond
+                  (= matching-cols-count 1)
+                  (reduced (first matching-cols))
+                  (> matching-cols-count 1)
+                  (throw (RuntimeException. "TODO ambigious cols"))
+                  :else
+                  nil)))))
+        nil
+        (range 0 (count elements)))
+      (throw (RuntimeException. "no such col")))))
+
 (defmethod visit :IDENTIFIER [[[_ & args] parse-context]]
   (if (= (:context parse-context) :field-list)
     (let [field-name (keyword (str/join "." args))
           row-sym (:row-sym parse-context)
-          type (get-in parse-context [:binding field-name])]
-      [`(~field-name ~row-sym), (assoc parse-context
-                                  :field-name field-name
-                                  :type type)])
+          field-name-in-ctxt (fully-qualified-name field-name parse-context)
+          _ (println field-name-in-ctxt)
+          type (get-in parse-context [:binding field-name-in-ctxt])]
+      [`(~field-name-in-ctxt ~row-sym),
+       (assoc parse-context
+         ; :field-name is the one displayed if no alias, so don't qualify
+         :field-name field-name
+         :type type)])
     ; assuming ctxt :from -> change if more types later
     [`(load-qualified-view ~(vec args))
      (assoc parse-context
@@ -286,7 +341,7 @@
                (format "Bad type '%s' for NOT." (str (:type expr-ctxt))))))))
 
 (defn to-clojure-data [parsed]
-  (first (visit [(second parsed) {}])))
+  (first (visit [(second parsed) {:binding binding-map}])))
 
 (defn sql-to-clojure [sql]
   (let [parsed (parser sql)]

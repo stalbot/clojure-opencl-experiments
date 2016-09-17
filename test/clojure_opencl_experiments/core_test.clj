@@ -1,15 +1,28 @@
 (ns clojure-opencl-experiments.core-test
   (:require [clojure.test :refer :all]
-            [clojure-opencl-experiments.core :refer :all]))
+            [clojure-opencl-experiments.core :refer :all]
+            [clojure.string :as string]))
+
+(defmacro catch-fail [form]
+  (let [e (symbol "e")]
+    `(try
+       ~form
+       (catch RuntimeException ~e
+         (let [~e
+               (str (.getMessage ~e)
+                    "\n"
+                    (->> ~e .getStackTrace (map str) (string/join "\n")))]
+           (println ~e)
+           ~e)))))
 
 (defn all-vals [sql]
-  (-> sql sql-to-clojure eval))
+  (catch-fail (-> sql sql-to-clojure eval)))
 
 (defn first-selected-val [sql]
-  (-> sql all-vals first vals first))
+  (catch-fail (-> sql all-vals first vals first)))
 
 (defn first-selected-field-name [sql]
-  (-> sql all-vals first keys first))
+  (catch-fail (-> sql all-vals first keys first)))
 
 (defn double= [^double x, ^double y]
   (< (Math/abs (- x y)) 0.0000000001))
@@ -31,12 +44,15 @@
 (swap! known-views assoc-in ["memory_test" "bar"]
        {:storage-type :memory-test,
         :name :bar,
-        :binding {:id :integer, :name :string, :value :float}})
-
+        :binding (qualify-binding-for-view
+                   :memory_test.bar
+                   {:id :integer, :name :string, :value :float})})
 
 (swap! memory-test-views assoc :bar
-       [{:id 1, :name "bob", :value 3.14}
-        {:id 2, :name "george", :value -231.232}])
+       (qualify-data-for-view
+         :memory_test.bar
+         [{:id 1, :name "bob", :value 3.14}
+          {:id 2, :name "george", :value -231.232}]))
 
 
 (deftest select-from-tests

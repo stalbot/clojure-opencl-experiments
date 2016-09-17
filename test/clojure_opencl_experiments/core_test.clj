@@ -77,8 +77,10 @@
          [{:memory_test.bar.id 1, :memory_test.bar.name "bob", :memory_test.bar.value 3.14}
           {:memory_test.bar.id 2, :memory_test.bar.name "george", :memory_test.bar.value -231.232}])))
 
-(deftest select-from-inline-dt-tests
+(deftest select-from-subselect
   (is (= (all-vals "select * from (select 1 as foo) as baz")
          [{:foo 1}]))
   (is (= (all-vals "select baz.foo + 1.2 as bar from (select 2 as foo) as baz")
-         [{:bar 3.2}])))
+         [{:bar 3.2}]))
+  (is (= (all-vals "select foo + 1 as bar, baz.t from (select 2 as foo, 'hi' as t) as baz")
+         [{:bar 3, :baz.t "hi"}])))

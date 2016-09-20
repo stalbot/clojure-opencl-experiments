@@ -3,7 +3,8 @@
     ;[uncomplicate.clojurecl [core :refer :all]
     ; [info :refer :all]]
             [clojure.string :as str]
-            [clojure.string :as string]))
+            [clojure.string :as string])
+  (:import (java.util.regex Pattern)))
 
 (def ^:const grammar-s
   (slurp "resources/grammar.txt"))
@@ -58,10 +59,10 @@
                         [:float :integer]   :float,
                         [:float :float]     :float}
       comparison-func
-      (fn [[[t1 t2] :as types]]
-        (if (and (= (count types) 2)
-                 (or (= t1 t2) (contains? number-type-lkup types)))
-          :bool))]
+      (fn [[t1 t2 :as types]]
+          (if (and (= (count types) 2)
+                   (or (= t1 t2) (contains? number-type-lkup types)))
+            :bool))]
   (def func-type-lookup
     {:or {[:bool :bool] :bool}
      :and {[:bool :bool] :bool}
@@ -189,12 +190,19 @@
         [[data-code data-ctxt] [_ alias-ctxt]] (map visit args)
         alias-name (:view-name alias-ctxt)
         original-name (:view-name data-ctxt)
-        parse-context (assoc parse-context :binding (:binding data-ctxt))]
+        parse-context (update parse-context
+                              :binding
+                              merge
+                              (:binding data-ctxt))
+        parse-context (assoc-in parse-context
+                                [:aliased-views alias-name]
+                                original-name)
+        parse-context (assoc parse-context
+                        :view-name
+                        (or alias-name original-name))]
     (when-not (or original-name alias-name)
       (throw (RuntimeException. "TODO every derived table blah blah alias")))
-    [data-code (assoc-in parse-context
-                       [:aliased-views alias-name]
-                       original-name)]))
+    [data-code parse-context]))
 
 (defmethod visit :ALIAS [[[_ & args] parse-context]]
   ; deliberately do not worry about \"s in the parse ->
@@ -204,17 +212,180 @@
                    :field-name)]
     [nil (assoc parse-context key-name (keyword (first args)))]))
 
-(defmethod visit :JOIN [[[_ & args] parse-context]])
+(defmethod visit :JOIN [[[_ & args] parse-context]]
+  (let [data-sym (symbol "data")
+
+        [join-component-forms, new-context]
+        (reduce
+          (fn [[forms context] arg]
+            (let [[form ctxt] (visit [arg context])]
+              [(conj forms form) ctxt]))
+          [[], (assoc parse-context :data-sym data-sym)]
+          args)
+
+        forms-for-let (mapcat (fn [form] [data-sym form])
+                              join-component-forms)]
+    [`(let [~data-sym nil
+            ~@forms-for-let]
+        ~data-sym),
+     new-context]))
 
 
-(defmethod visit :ON_JOIN [[[_ & args] parse-context]])
+(defmethod visit :ON_JOIN [[[_ & args] parse-context]]
+  (let [by-key (into {} (for [[key & _ :as node] args] [key node]))
+        [view-code view-ctxt] (visit [(:VIEW by-key) parse-context])
+
+        new-data-sym (symbol "new-data")
+        ctxt-for-on (assoc view-ctxt
+                      ; could probably just use :view-ctxt directly,
+                      ; but explicitlness better to avoid confusion later
+                      :new-view-name (:view-name view-ctxt)
+                      :new-data-sym new-data-sym
+                      :join-strategy (-> by-key :JOIN_STRAT first (or :INNER))
+                      :join-direction (-> by-key :JOIN_DIRECTION first))
+
+        [on-code _] (visit [(:ON by-key) ctxt-for-on])
+        on-code `(let [~new-data-sym ~view-code] ~on-code)]
+    [on-code, view-ctxt]))
+
+(defn- form-contains-view-name? [form view-name]
+  (let [view-name-reg (if (= (type view-name) Pattern)
+                        view-name
+                        (re-pattern (str "^" (name view-name) "\\.")))]
+    ; TODO: where the hell is `any?`
+    (not (not-any?
+           #(or (and (keyword? %) (re-find view-name-reg (name %)))
+                (and (seq? %) (form-contains-view-name? % view-name)))
+           form))))
+
+(defn- subseq-vals [func]
+  [#(reduce concat (vals (subseq %1 func %2))), true])
+
+(def supported-split-funcs
+  {`= [#(get %1 %2) false]
+   `> (subseq-vals >)
+   `>= (subseq-vals >=)
+   `< (subseq-vals <)
+   `<= (subseq-vals <=)})
+
+(defn split-on-code-across-join [expr-code joining-view-name]
+  (if-not (= 3 (count expr-code))
+    ; form was not a binary function, we are screwed
+    []
+    (let [[func form1 form2] expr-code
+          forms [form1 form2]
+          forms-with-views (map
+                             #(form-contains-view-name? % joining-view-name)
+                             forms)]
+      (if (or (not (contains? supported-split-funcs func))
+              (every? true? forms-with-views))
+        ; cannot split expression by views, screwed again
+        ; TODO: this isn't quite right:
+        ; "ON foo.bar + foo.baz = 2" aka
+        ; (= (+ (:foo.bar row-sym) (:foo.baz row-sym)) 2) will get a
+        ; false negative here and KABOOM down the line
+        ; many more TODOs here: support trees of ORs/ANDs with splittable
+        ; leaf conditions, optimize the above example to be splittable, etc.
+        []
+        [func forms (if (first forms-with-views) 1 0)]))))
+
+
+(def func-swapper
+  ; depending on who we're iterating over, will need to flip around the
+  ; gt/lt -> this is 100% wrong I think, just need to remember to fix it
+  {`>= `<=
+   `> `<})
+
+
+(defn join-with-grouping
+  [func forms left-idx left-data-sym right-data-sym row-sym parse-context]
+  (let [[lform rform] (if (= left-idx 0) forms (reverse forms))
+        [iter-sym lkup-sym] (map symbol ["iter-data" "lkup-data"])
+        ; reiterating, have not thought through the below line at all
+        func (if (= left-idx 1) (get func-swapper func func) func)
+        [transformed-func sort-required] (get supported-split-funcs func)
+        [ksym vsym rsym] (map symbol ["k" "v" "r"])
+        inner-only? (nil? (:join-direction parse-context))
+        ; if inner join, which one we iterate over doesn't really matter
+        vals-of-iters (if (= (:join-direction parse-context) :left)
+                        [left-data-sym right-data-sym]
+                        [right-data-sym left-data-sym])]
+
+    `(let [~left-data-sym (group-by #(let [~row-sym %] ~lform)
+                                    ~left-data-sym)
+           ~right-data-sym (group-by #(let [~row-sym %] ~rform)
+                                     ~right-data-sym)
+
+           [~iter-sym ~lkup-sym] ~vals-of-iters
+           ~@(if sort-required [lkup-sym, `(into (sorted-map) ~lkup-sym)])]
+       ; TODO: in a FULL OUTER join, will need to add in all grouped keys
+       ; from lkup-sym that weren't in iter-sym
+       (mapcat
+         (fn [~ksym ~vsym]
+           (mapcat
+             (fn [~rsym]
+               (or
+                 (not-empty
+                   (map #(merge ~rsym %)
+                        (~transformed-func ~lkup-sym ~ksym)))
+                 ; if left/right, keep a row for every join 'miss'
+                 ~(if inner-only? [] [rsym])))
+             ~vsym))
+         ~iter-sym))))
+
+
+(defn join-with-scan
+  ; TODO: there's some duplicate logic that could be eliminated from
+  ; this and the above
+  [expr-code left-data-sym right-data-sym row-sym parse-context]
+  (let [inner-only? (nil? (:join-direction parse-context))
+        ; if inner join, which one we iterate over doesn't really matter
+        [iter-sym other-sym] (if (= (:join-direction parse-context) :left)
+                               [left-data-sym right-data-sym]
+                               [right-data-sym left-data-sym])]
+    `(mapcat
+       (fn [~row-sym]
+         (->
+           (filter
+             #(-> % first nil? not)
+             (map #(let [~row-sym (merge ~row-sym %)]
+                     (if ~expr-code ~row-sym))
+                  ~other-sym))
+           ; need to get the row even if no match for left/right
+           ~@(if-not inner-only? [`not-empty `(or [~row-sym])])))
+       ~iter-sym)))
+
+
+(defmethod visit :ON [[[_ & args] parse-context]]
+  (let [row-sym (gensym)
+        ctxt-for-expr (assoc parse-context :row-sym row-sym)
+        [expr-code _] (visit [(first args) ctxt-for-expr])
+        [func forms left-idx] (split-on-code-across-join
+                                expr-code
+                                (:new-view-name parse-context))
+        code (if func
+               (join-with-grouping func
+                                   forms
+                                   left-idx
+                                   (:data-sym parse-context)
+                                   (:new-data-sym parse-context)
+                                   row-sym
+                                   parse-context)
+               (join-with-scan expr-code
+                               (:data-sym parse-context)
+                               (:new-data-sym parse-context)
+                               row-sym
+                               parse-context))]
+    [code ctxt-for-expr]))
+
 
 (def one-true-field-name-counter (atom -1))
 (defn- gen-field-name []
   (keyword (str "field_" (swap! one-true-field-name-counter inc))))
 
 (defmethod visit :EXPRESSION [[[_ & args] parse-context]]
-  (let [[code ctxt] (visit [(first args) parse-context])]
+  (let [ctxt-for-child (assoc parse-context :context :expression)
+        [code ctxt] (visit [(first args) ctxt-for-child])]
     ; yeah, this should probably use the SQL like a real thing
     [code (update ctxt :field-name #(or % (gen-field-name)))]))
 
@@ -290,7 +461,7 @@
   (let [view (lookup-view view-path)]
     (if view
       (:binding view)
-      (throw (RuntimeException. "TODO bad view")))))
+      (throw (RuntimeException. (str "TODO bad view '" view "'"))))))
 
 (defn- binding-by-name* [binding]
   (reduce
@@ -333,7 +504,7 @@
       (throw (RuntimeException. "no such col")))))
 
 (defmethod visit :IDENTIFIER [[[_ & args] parse-context]]
-  (if (= (:context parse-context) :field-list)
+  (if (= (:context parse-context) :expression)
     (let [field-name (keyword (str/join "." args))
           row-sym (:row-sym parse-context)
           field-name-in-ctxt (fully-qualified-name field-name parse-context)

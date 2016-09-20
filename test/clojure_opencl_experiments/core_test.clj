@@ -31,6 +31,8 @@
   (is (= (first-selected-val "select 1") 1))
   (is (= (first-selected-val "select 1.12") 1.12))
   (is (= (first-selected-val "select 'hi'") "hi"))
+  (is (= (first-selected-val "select 1 = 1") true))
+  (is (= (first-selected-val "select 1 = 4") false))
   (is (= (first-selected-field-name "select 5242 as something") :something))
   (is (= (first-selected-field-name "select 5242 as \"foo.bar\"")
          (keyword "\"foo.bar\"")))
@@ -84,3 +86,11 @@
          [{:bar 3.2}]))
   (is (= (all-vals "select foo + 1 as bar, baz.t from (select 2 as foo, 'hi' as t) as baz")
          [{:bar 3, :baz.t "hi"}])))
+
+(deftest select-from-join
+  ; TODO: note to self: problem here is with the join aliases,
+  ; need to inject the alias into the row keys/binding directly
+  (is (= (count (all-vals "select name from memory_test.bar
+                                      left join memory_test.bar as baz
+                                        on baz.id=bar.id"))
+         2)))

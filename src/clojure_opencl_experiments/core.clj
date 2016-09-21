@@ -186,23 +186,14 @@
 (defmethod visit :LIMIT [[[_ & args] parse-context]])
 
 (defmethod visit :VIEW [[[_ & args] parse-context]]
-  (let [visit #(visit [% parse-context])
-        [[data-code data-ctxt] [_ alias-ctxt]] (map visit args)
+  (let [[_ alias-ctxt] (visit [(second args) parse-context])
         alias-name (:view-name alias-ctxt)
-        original-name (:view-name data-ctxt)
-        parse-context (update parse-context
-                              :binding
-                              merge
-                              (:binding data-ctxt))
-        parse-context (assoc-in parse-context
-                                [:aliased-views alias-name]
-                                original-name)
-        parse-context (assoc parse-context
-                        :view-name
-                        (or alias-name original-name))]
-    (when-not (or original-name alias-name)
+        [data-code data-ctxt] (visit [(first args) (assoc parse-context
+                                                     :alias-name alias-name)])]
+
+    (when-not (or alias-name (:view-name data-ctxt))
       (throw (RuntimeException. "TODO every derived table blah blah alias")))
-    [data-code parse-context]))
+    [data-code data-ctxt]))
 
 (defmethod visit :ALIAS [[[_ & args] parse-context]]
   ; deliberately do not worry about \"s in the parse ->
@@ -427,29 +418,13 @@
   (let [sval (first args)]
     [(subs sval 1 (- (count sval) 1)), (assoc parse-context :type :string)]))
 
-(defmulti load-view :storage-type)
-
-(def memory-test-views (atom {}))
-(defmethod load-view :memory-test [{:keys [name]}]
-  (get @memory-test-views name))
-
-(def known-views (atom {}))
-(defn lookup-view [view-path]
-  (get-in @known-views view-path))
-
-(defn load-qualified-view [view-path]
-  (load-view (lookup-view view-path)))
-
 (defn- qualify-keys-for-view [view-name row]
   (persistent!
     (reduce-kv
       (fn [new-row k v]
-        (assoc! new-row (keyword (str view-name "." (name k))) v))
+        (assoc! new-row (keyword (str (name view-name) "." (name k))) v))
       (transient {})
       row)))
-
-(defn qualify-binding-for-view [fully-qualified-view binding]
-  (qualify-keys-for-view (name fully-qualified-view) binding))
 
 (defn qualify-data-for-view [fully-qualified-view data]
   (let [view-name (name fully-qualified-view)]
@@ -457,10 +432,24 @@
       #(qualify-keys-for-view view-name %)
       data)))
 
-(defn binding-from-qualified-view [view-path]
+(defmulti load-view :storage-type)
+
+(def memory-test-views (atom {}))
+(defmethod load-view :memory-test [{:keys [name view-name]}]
+  (qualify-data-for-view view-name (get @memory-test-views name)))
+
+(def known-views (atom {}))
+(defn lookup-view [view-path]
+  (get-in @known-views view-path))
+
+(defn load-qualified-view [view-path view-name]
+  ; view-name is underlying view name or alias
+  (load-view (assoc (lookup-view view-path) :view-name view-name)))
+
+(defn binding-from-qualified-view [view-path view-name]
   (let [view (lookup-view view-path)]
     (if view
-      (:binding view)
+      (qualify-keys-for-view view-name (:binding view))
       (throw (RuntimeException. (str "TODO bad view '" view "'"))))))
 
 (defn- binding-by-name* [binding]
@@ -479,26 +468,20 @@
 
 (defn fully-qualified-name [field-name parse-context]
   (let [elements (-> field-name name (string/split #"\."))
-        aliased-views (:aliased-views parse-context)
         name-lkup (binding-by-name (:binding parse-context))]
     (or
       (reduce
         (fn [_ idx]
-          (let [front (str/join "." (take (+ 1 idx) elements))
-                back (str/join "." (drop idx elements))
-                resolved-alias (get aliased-views front)]
-            (if resolved-alias
-              (reduced
-                (keyword (string/join "." [resolved-alias back])))
-              (let [matching-cols (get name-lkup back)
-                    matching-cols-count (count matching-cols)]
-                (cond
-                  (= matching-cols-count 1)
-                  (reduced (first matching-cols))
-                  (> matching-cols-count 1)
-                  (throw (RuntimeException. "TODO ambigious cols"))
-                  :else
-                  nil)))))
+          (let [back (str/join "." (drop idx elements))
+                matching-cols (get name-lkup back)
+                matching-cols-count (count matching-cols)]
+            (cond
+              (= matching-cols-count 1)
+              (reduced (first matching-cols))
+              (> matching-cols-count 1)
+              (throw (RuntimeException. "TODO ambigious cols"))
+              :else
+              nil)))
         nil
         (range 0 (count elements)))
       (throw (RuntimeException. "no such col")))))
@@ -509,16 +492,17 @@
           row-sym (:row-sym parse-context)
           field-name-in-ctxt (fully-qualified-name field-name parse-context)
           type (get-in parse-context [:binding field-name-in-ctxt])]
-      [`(~field-name-in-ctxt ~row-sym),
+      [`(last [(println ~row-sym ~field-name-in-ctxt) (~field-name-in-ctxt ~row-sym)])
        (assoc parse-context
          ; :field-name is the one displayed if no alias, so don't qualify
          :field-name field-name
          :type type)])
     ; assuming ctxt :from -> change if more types later
-    [`(load-qualified-view ~(vec args))
-     (assoc parse-context
-       :binding (binding-from-qualified-view args)
-       :view-name (str/join "." args))]))
+    (let [view-name (or (:alias-name parse-context) (string/join "." args))]
+      [`(load-qualified-view ~(vec args) ~view-name)
+       (assoc parse-context
+         :binding (binding-from-qualified-view args view-name)
+         :view-name view-name)])))
 
 (defmethod visit :NOT_EXPRESSION [[[_ & args] parse-context]]
   (let [[expr-code expr-ctxt] (visit [(first args) parse-context])]

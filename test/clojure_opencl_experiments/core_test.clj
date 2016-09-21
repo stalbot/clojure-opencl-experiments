@@ -46,29 +46,21 @@
 (swap! known-views assoc-in ["memory_test" "bar"]
        {:storage-type :memory-test,
         :name :bar,
-        :binding (qualify-binding-for-view
-                   :memory_test.bar
-                   {:id :integer, :name :string, :value :float})})
+        :binding {:id :integer, :name :string, :value :float}})
 
 (swap! memory-test-views assoc :bar
-       (qualify-data-for-view
-         :memory_test.bar
-         [{:id 1, :name "bob", :value 3.14}
-          {:id 2, :name "george", :value -231.232}]))
+   [{:id 1, :name "bob", :value 3.14}
+    {:id 2, :name "george", :value -231.232}])
 
 (swap! known-views assoc-in ["memory_test" "bar_child"]
        {:storage-type :memory-test,
         :name :bar_child,
-        :binding (qualify-binding-for-view
-                   :memory_test.bar_child
-                   {:id :integer, :bar_id :integer, :value :string})})
+        :binding {:id :integer, :bar_id :integer, :value :string}})
 
 (swap! memory-test-views assoc :bar_child
-       (qualify-data-for-view
-         :memory_test.bar_child
          [{:id 1, :bar_id 1, :value "bob_val"}
           {:id 2, :bar_id 2, :value "george_val_1"}
-          {:id 3, :bar_id 2, :value "george_val_2"}]))
+          {:id 3, :bar_id 2, :value "george_val_2"}])
 
 (deftest select-from-table-tests
   (is (= (all-vals "select 1 as val from memory_test.bar")

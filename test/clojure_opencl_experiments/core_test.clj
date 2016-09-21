@@ -86,7 +86,9 @@
 
 (deftest select-from-subselect
   (is (= (all-vals "select * from (select 1 as foo) as baz")
-         [{:foo 1}]))
+         [{:baz.foo 1}]))
+  (is (= (all-vals "select bar.foo from (select * from (select 1 as foo) as baz) as bar")
+         [{:bar.foo 1}]))
   (is (= (all-vals "select baz.foo + 1.2 as bar from (select 2 as foo) as baz")
          [{:bar 3.2}]))
   (is (= (all-vals "select foo + 1 as bar, baz.t from (select 2 as foo, 'hi' as t) as baz")
@@ -105,7 +107,12 @@
            {:name "george", :bar_child.value "george_val_2"})))
   ; TODO: note to self: problem here is with the join aliases,
   ; need to inject the alias into the row keys/binding directly
-  (is (= (count (all-vals "select name from memory_test.bar
-                                      left join memory_test.bar as baz
-                                        on baz.id=bar.id"))
-         2)))
+  (is (= (all-vals "select baz.name, bar.name from memory_test.bar
+                                    left join memory_test.bar as baz
+                                        on baz.name=bar.name")
+         '({:baz.name "bob", :bar.name "bob"}
+           {:baz.name "george", :bar.name "george"})))
+  (is (= (all-vals "select right.foo, left.foo from (select 1 as id, 1 as foo) as right
+                            left join (select 1 as id, 2 as foo) as left
+                            on right.id = left.id")
+         '({:right.foo 1, :left.foo 2}))))

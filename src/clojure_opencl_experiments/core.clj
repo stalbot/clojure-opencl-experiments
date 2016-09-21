@@ -23,10 +23,39 @@
 ; convenience to do less nil-checking
 (defmethod visit nil [[& _]] [nil nil])
 
+(defn qualify-keys-for-view [view-name row]
+  (persistent!
+    (reduce-kv
+      (fn [new-row k v]
+        (assoc! new-row (keyword (str (name view-name) "." (name k))) v))
+      (transient {})
+      row)))
 
-(defn binding-from-context [context]
-  ; here in case it needs to end up doing more
-  (:binding context))
+(defn qualify-data-for-view [fully-qualified-view data]
+  (let [view-name (name fully-qualified-view)]
+    (mapv
+      #(qualify-keys-for-view view-name %)
+      data)))
+
+(defmulti load-view :storage-type)
+
+(def memory-test-views (atom {}))
+(defmethod load-view :memory-test [{:keys [name view-name]}]
+  (qualify-data-for-view view-name (get @memory-test-views name)))
+
+(def known-views (atom {}))
+(defn lookup-view [view-path]
+  (get-in @known-views view-path))
+
+(defn load-qualified-view [view-path view-name]
+  ; view-name is underlying view name or alias
+  (load-view (assoc (lookup-view view-path) :view-name view-name)))
+
+(defn binding-from-qualified-view [view-path view-name]
+  (let [view (lookup-view view-path)]
+    (if view
+      (qualify-keys-for-view view-name (:binding view))
+      (throw (RuntimeException. (str "TODO bad view '" view "'"))))))
 
 (defmethod visit :SELECT [[[_ & args] parse-context]]
   (let [parse-context (assoc parse-context
@@ -38,7 +67,12 @@
         bound-context from-context
 
         [field-code field-context] (visit [(:FIELD_LIST by-key) bound-context])
-        new-binding (binding-from-context field-context)
+
+        new-binding (:binding field-context)
+        alias-name (:alias-name parse-context)
+        new-binding (if alias-name
+                      (qualify-keys-for-view alias-name new-binding)
+                      new-binding)
         code `(map ~field-code ~(or from-code [{}]))
         bound-context (assoc parse-context :binding new-binding)
 
@@ -50,7 +84,10 @@
                      `(~transform-func ~code)
                      code)))
                code
-               [:GROUP_BY, :ORDER_BY, :LIMIT])]
+               [:GROUP_BY, :ORDER_BY, :LIMIT])
+        code (if alias-name
+               `(qualify-data-for-view ~alias-name ~code)
+               code)]
 
     [code bound-context]))
 
@@ -186,10 +223,12 @@
 (defmethod visit :LIMIT [[[_ & args] parse-context]])
 
 (defmethod visit :VIEW [[[_ & args] parse-context]]
-  (let [[_ alias-ctxt] (visit [(second args) parse-context])
+  (let [parse-context (assoc parse-context :context :from) ; TODO: or :view?
+        [_ alias-ctxt] (visit [(second args) parse-context])
         alias-name (:view-name alias-ctxt)
         [data-code data-ctxt] (visit [(first args) (assoc parse-context
-                                                     :alias-name alias-name)])]
+                                                     :alias-name alias-name)])
+        data-ctxt (update data-ctxt :binding merge (:binding parse-context))]
 
     (when-not (or alias-name (:view-name data-ctxt))
       (throw (RuntimeException. "TODO every derived table blah blah alias")))
@@ -418,40 +457,6 @@
   (let [sval (first args)]
     [(subs sval 1 (- (count sval) 1)), (assoc parse-context :type :string)]))
 
-(defn- qualify-keys-for-view [view-name row]
-  (persistent!
-    (reduce-kv
-      (fn [new-row k v]
-        (assoc! new-row (keyword (str (name view-name) "." (name k))) v))
-      (transient {})
-      row)))
-
-(defn qualify-data-for-view [fully-qualified-view data]
-  (let [view-name (name fully-qualified-view)]
-    (mapv
-      #(qualify-keys-for-view view-name %)
-      data)))
-
-(defmulti load-view :storage-type)
-
-(def memory-test-views (atom {}))
-(defmethod load-view :memory-test [{:keys [name view-name]}]
-  (qualify-data-for-view view-name (get @memory-test-views name)))
-
-(def known-views (atom {}))
-(defn lookup-view [view-path]
-  (get-in @known-views view-path))
-
-(defn load-qualified-view [view-path view-name]
-  ; view-name is underlying view name or alias
-  (load-view (assoc (lookup-view view-path) :view-name view-name)))
-
-(defn binding-from-qualified-view [view-path view-name]
-  (let [view (lookup-view view-path)]
-    (if view
-      (qualify-keys-for-view view-name (:binding view))
-      (throw (RuntimeException. (str "TODO bad view '" view "'"))))))
-
 (defn- binding-by-name* [binding]
   (reduce
     (fn [new-b [k _]]
@@ -492,7 +497,7 @@
           row-sym (:row-sym parse-context)
           field-name-in-ctxt (fully-qualified-name field-name parse-context)
           type (get-in parse-context [:binding field-name-in-ctxt])]
-      [`(last [(println ~row-sym ~field-name-in-ctxt) (~field-name-in-ctxt ~row-sym)])
+      [`(~field-name-in-ctxt ~row-sym)
        (assoc parse-context
          ; :field-name is the one displayed if no alias, so don't qualify
          :field-name field-name

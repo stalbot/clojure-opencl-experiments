@@ -56,6 +56,19 @@
          [{:id 1, :name "bob", :value 3.14}
           {:id 2, :name "george", :value -231.232}]))
 
+(swap! known-views assoc-in ["memory_test" "bar_child"]
+       {:storage-type :memory-test,
+        :name :bar_child,
+        :binding (qualify-binding-for-view
+                   :memory_test.bar_child
+                   {:id :integer, :bar_id :integer, :value :string})})
+
+(swap! memory-test-views assoc :bar_child
+       (qualify-data-for-view
+         :memory_test.bar_child
+         [{:id 1, :bar_id 1, :value "bob_val"}
+          {:id 2, :bar_id 2, :value "george_val_1"}
+          {:id 3, :bar_id 2, :value "george_val_2"}]))
 
 (deftest select-from-table-tests
   (is (= (all-vals "select 1 as val from memory_test.bar")
@@ -88,6 +101,16 @@
          [{:bar 3, :baz.t "hi"}])))
 
 (deftest select-from-join
+  (is (= (all-vals "select bar.name, yo
+                      from (select 'hi' as name, 1 as yo) as thing
+                      join memory_test.bar on yo=id")
+         [{:bar.name "bob", :yo 1}]))
+  (is (= (all-vals "select name, bar_child.value
+                      from memory_test.bar_child
+                      join memory_test.bar on bar_id=bar.id")
+         '({:name "bob", :bar_child.value "bob_val"}
+           {:name "george", :bar_child.value "george_val_1"}
+           {:name "george", :bar_child.value "george_val_2"})))
   ; TODO: note to self: problem here is with the join aliases,
   ; need to inject the alias into the row keys/binding directly
   (is (= (count (all-vals "select name from memory_test.bar

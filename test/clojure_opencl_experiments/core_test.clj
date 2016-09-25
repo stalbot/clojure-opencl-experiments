@@ -1,7 +1,8 @@
 (ns clojure-opencl-experiments.core-test
   (:require [clojure.test :refer :all]
             [clojure-opencl-experiments.core :refer :all]
-            [clojure.string :as string]))
+            [clojure.string :as string]
+            [criterium.core :refer [with-progress-reporting quick-bench]]))
 
 (defmacro catch-fail [form]
   (let [e (symbol "e")]
@@ -87,6 +88,8 @@
 (deftest select-from-subselect
   (is (= (all-vals "select * from (select 1 as foo) as baz")
          [{:baz.foo 1}]))
+  ; TODO: this passing test is a lie, the second subselect ends up with
+  ; a field named bar.baz.foo and it "just happens" to work
   (is (= (all-vals "select bar.foo from (select * from (select 1 as foo) as baz) as bar")
          [{:bar.foo 1}]))
   (is (= (all-vals "select baz.foo + 1.2 as bar from (select 2 as foo) as baz")

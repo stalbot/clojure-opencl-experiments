@@ -23,11 +23,17 @@
 ; convenience to do less nil-checking
 (defmethod visit nil [[& _]] [nil nil])
 
+(defn split-identifier [identifier]
+  (re-seq #"(?:\".*?\"|[^.\"]+)" identifier))
+
 (defn qualify-keys-for-view [view-name row]
   (persistent!
     (reduce-kv
       (fn [new-row k v]
-        (assoc! new-row (keyword (str (name view-name) "." (name k))) v))
+        (let [unqualified-name (-> k name split-identifier last)]
+          (assoc! new-row
+                  (keyword (str (name view-name) "." unqualified-name))
+                  v)))
       (transient {})
       row)))
 
@@ -74,7 +80,9 @@
                       (qualify-keys-for-view alias-name new-binding)
                       new-binding)
         code `(map ~field-code ~(or from-code [{}]))
-        bound-context (assoc parse-context :binding new-binding)
+        bound-context (assoc parse-context
+                        :binding new-binding
+                        :field-idx-lkup (:field-idx-lkup field-context))
 
         code (reduce
                (fn [code key]
@@ -144,12 +152,21 @@
                                       [(:field-name ctxt) code])
                                     all-new-fields))
         code `(fn [~row-sym] ~selected-field-code)
+
+        field-idx-lkup (into
+                         {}
+                         (map-indexed
+                           (fn [idx [_ ctxt]]
+                             [(+ 1 idx) (:field-name ctxt)])
+                           all-new-fields))
         new-binding (into binding-map
                           (map
                             (fn [[_ ctxt]]
                               [(:field-name ctxt) (:type ctxt)])
                             all-new-fields))]
-    [code, (assoc parse-context :binding new-binding)]))
+    [code, (assoc parse-context
+             :binding new-binding
+             :field-idx-lkup field-idx-lkup)]))
 
 (defmethod visit :FROM [[[_ & args] parse-context]]
   (let [parse-context (assoc parse-context :context :from)]
@@ -204,13 +221,13 @@
                         (if (integer? code)
                           (let [kw-for-idx (get by-idx code)]
                             (if-not (nil? code)
-                              `(get ~arg-name kw-for-idx)
+                              `(~kw-for-idx ~arg-name)
                               (throw
                                 (RuntimeException. "TODO bad group idx"))))
                           `(~code ~arg-name))))
                     args)
         aggregator (make-aggregator parse-context)
-        grouping-fn `(fn [~arg-name] group-vec)]
+        grouping-fn `(fn [~arg-name] ~group-vec)]
     [`#(->>
         %
         (group-by ~grouping-fn)
@@ -472,7 +489,7 @@
   (memoize binding-by-name*))
 
 (defn fully-qualified-name [field-name parse-context]
-  (let [elements (-> field-name name (string/split #"\."))
+  (let [elements (-> field-name name split-identifier)
         name-lkup (binding-by-name (:binding parse-context))]
     (or
       (reduce

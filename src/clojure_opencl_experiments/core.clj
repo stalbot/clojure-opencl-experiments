@@ -1,5 +1,6 @@
 (ns clojure-opencl-experiments.core
-  (:require [instaparse.core :as insta]
+  (:require [clojure-opencl-experiments.sql-functions :as sql-functions]
+            [instaparse.core :as insta]
     ;[uncomplicate.clojurecl [core :refer :all]
     ; [info :refer :all]]
             [clojure.string :as str]
@@ -22,6 +23,10 @@
 
 ; convenience to do less nil-checking
 (defmethod visit nil [[& _]] [nil nil])
+
+(defn eval-sql-code [sql-as-clojure]
+  ; have to evaluate in this ns
+  (eval sql-as-clojure))
 
 (defn split-identifier [identifier]
   (re-seq #"(?:\".*?\"|[^.\"]+)" identifier))
@@ -64,6 +69,9 @@
       (throw (RuntimeException. (str "TODO bad view '" view "'"))))))
 
 (defmethod visit :SELECT [[[_ & args] parse-context]]
+  (visit [(first args) parse-context]))
+
+(defmethod visit :SELECT_ [[[_ & args] parse-context]]
   (let [parse-context (assoc parse-context
                         :statement-type :select
                         :context :select)
@@ -99,6 +107,15 @@
 
     [code bound-context]))
 
+(defmethod visit :UNION [[[_ & args] parse-context]]
+  (when-not (= (string/upper-case (second args)) "ALL")
+    (throw (RuntimeException. "TODO UNION not-ALL not implemented yet")))
+  (let [[left-code left-ctxt] (visit [(first args) parse-context])
+        [right-code right-ctxt] (visit [(last args) parse-context])]
+    (when-not (= (:binding right-ctxt) (:binding left-ctxt))
+      (throw (RuntimeException. "TODO cannot union different schemas")))
+    [`(concat ~left-code ~right-code) right-ctxt]))
+
 (let [number-type-lkup {[:integer :integer] :integer,
                         [:integer :float]   :float,
                         [:float :integer]   :float,
@@ -107,7 +124,10 @@
       (fn [[t1 t2 :as types]]
           (if (and (= (count types) 2)
                    (or (= t1 t2) (contains? number-type-lkup types)))
-            :bool))]
+            :bool))
+      string->string (fn [args] (when (and (= 1 (count args))
+                                           (= (first args) :string))
+                                      :string))]
   (def func-type-lookup
     {:or {[:bool :bool] :bool}
      :and {[:bool :bool] :bool}
@@ -116,11 +136,17 @@
      :>= comparison-func
      :< comparison-func
      :<= comparison-func
-     :is (fn [args] (= (count args) 2))  ; any two types
+     :is (fn [args] (when (= (count args) 2) :bool))  ; any two types
      :+ number-type-lkup
      :* number-type-lkup
      :/ number-type-lkup
-     :- number-type-lkup}))
+     :- number-type-lkup
+
+     :concat (fn [args]
+               (when (and (>= (count args) 2) (every? #{:string} args))
+                 :string))
+     :lower string->string
+     :upper string->string}))
 
 (defn check-return-type! [func & arg-types]
   (let [type-val-getter (get func-type-lookup func)
@@ -196,38 +222,58 @@
                                     :type field-type)])
       (filter #(re-find qualification-reg (name (first %))) binding))))
 
-(defn update! [tmap key func & args]
-  (assoc! tmap key (apply func (get tmap key) args)))
+(defn noop [x] x)
 
 (defn make-aggregator [ctxt]
   (let [[accum row] [(gensym) (gensym)]
-        updates (map (fn [[agg-col, agg-func]]
-                       `(update! ~agg-col ~agg-func (get ~row ~agg-col)))
-                     (:agg-colls ctxt))]
-    `#(persistent!
+
+        ; total hacks to suppress arity warnings below
+        assoc! assoc!
+        update update
+
+        updates (map (fn [[agg-col agg-func _ agg-tmp-dims]]
+                       (let [agg-func-args (map (fn [dim] `(~dim ~row))
+                                                agg-tmp-dims)]
+                         `(assoc! ~agg-col (~agg-func
+                                             (~agg-col ~accum)
+                                             ~@agg-func-args))))
+                     (:agg-colls ctxt))
+        finishers (map (fn [[agg-col _ agg-finisher _]]
+                         `(update ~agg-col
+                                  ~(or agg-finisher (resolve 'noop))))
+                       (:agg-colls ctxt))]
+    `#(->
        (reduce
          (fn [~accum ~row]
            (-> ~accum
                ~@updates))
          (transient (first %))
-         (rest %)))))
+         (rest %))
+       persistent!
+       ~@finishers)))
+
+(defn vec-for-grouping [row-sym args parse-context]
+  (let [by-idx (:field-idx-lkup parse-context)
+        ctxt-for-expr (assoc parse-context :row-sym row-sym)]
+    (mapv
+      (fn [arg]
+        (let [[code _] (visit [arg ctxt-for-expr])]
+          (if (integer? code)
+            (let [kw-for-idx (get by-idx code)]
+              (if-not (nil? code)
+                `(~kw-for-idx ~row-sym)
+                (throw
+                  (RuntimeException. "TODO bad group idx"))))
+            code)))
+      args)))
 
 (defmethod visit :GROUP_BY [[[_ & args] parse-context]]
-  (let [arg-name (gensym)
-        by-idx (:field-idx-lkup parse-context)
-        group-vec (mapv
-                    (fn [arg]
-                      (let [[code _] (visit [arg parse-context])]
-                        (if (integer? code)
-                          (let [kw-for-idx (get by-idx code)]
-                            (if-not (nil? code)
-                              `(~kw-for-idx ~arg-name)
-                              (throw
-                                (RuntimeException. "TODO bad group idx"))))
-                          `(~code ~arg-name))))
-                    args)
+  (let [row-sym (gensym)
+        group-vec (vec-for-grouping row-sym args parse-context)
+
         aggregator (make-aggregator parse-context)
-        grouping-fn `(fn [~arg-name] ~group-vec)]
+        grouping-fn `(fn [~row-sym] ~group-vec)]
+    ; TODO: barf if there are any ungrouped non-aggregates
     [`#(->>
         %
         (group-by ~grouping-fn)
@@ -235,7 +281,12 @@
         (map ~aggregator))
      parse-context]))
 
-(defmethod visit :ORDER_BY [[[_ & args] parse-context]])
+(defmethod visit :ORDER_BY [[[_ & args] parse-context]]
+  (let [row-sym (gensym)
+        sort-vec (vec-for-grouping row-sym args parse-context)
+        sorter-fn `(fn [~row-sym] ~sort-vec)]
+    [`#(sort-by ~sorter-fn %)
+     parse-context]))
 
 (defmethod visit :LIMIT [[[_ & args] parse-context]])
 
@@ -436,9 +487,27 @@
     ; yeah, this should probably use the SQL like a real thing
     [code (update ctxt :field-name #(or % (gen-field-name)))]))
 
+
 (defmethod visit :FUNCTION_CALL [[[_ & args] parse-context]]
-  ; TODO
-  [nil nil])
+  (let [[func-code func-ctxt] (visit [(first args) parse-context])
+        arg-info (map #(visit [% parse-context]) (rest args))
+        arg-code (map first arg-info)
+        type (apply check-return-type!
+                    (:function func-ctxt)
+                    (map #(-> % second :type) arg-info))]
+
+    [`(~func-code ~@arg-code),
+     (assoc func-ctxt
+       :type type)]))
+
+(defmethod visit :FUNCTION [[[_ & args] parse-context]]
+  (let [func-name-raw (first args)
+        func-name (keyword (string/lower-case func-name-raw))
+        func-sym (get sql-functions/func-lkup func-name)]
+    (when-not func-sym
+      (throw (RuntimeException.
+               (format "Unknown function '%s'" func-name-raw))))
+    [func-sym (assoc parse-context :function func-name)]))
 
 (defmethod visit :BIN_OP_CALL [[[_ & args] parse-context]]
   (let [visit #(visit [% parse-context])
@@ -455,6 +524,7 @@
                     "is" (symbol "=")
                     ; we can nicely cheat -> every other SQL binary operation
                     ; happens to have the same name in clojure
+                    ; TODO: can't actually cheat, need to make them nullable
                     (symbol func-string))]
     [func-sym, (assoc parse-context :function (keyword func-string))]))
 

@@ -17,7 +17,7 @@
            ~e)))))
 
 (defn all-vals [sql]
-  (catch-fail (-> sql sql-to-clojure eval)))
+  (catch-fail (-> sql sql-to-clojure eval-sql-code)))
 
 (defn first-selected-val [sql]
   (catch-fail (-> sql all-vals first vals first)))
@@ -119,3 +119,46 @@
                             left join (select 1 as id, 2 as foo) as left
                             on right.id = left.id")
          '({:right.foo 1, :left.foo 2}))))
+
+(deftest test-union-all
+  (is (= (all-vals "select 1 as foo union all select 2 as foo")
+         '({:foo 1} {:foo 2})))
+  (is (= (all-vals "select 1 as foo, 'hi' as bar union all
+                      select 2 as foo, 'why' as bar")
+         '({:foo 1, :bar "hi"} {:foo 2, :bar "why"}))))
+
+(deftest group-by-test
+  ; aka does it work at all?
+  (is (= (all-vals "select name from memory_test.bar group by 1")
+         '({:name "bob"} {:name "george"})))
+  (is (= (all-vals "select name from memory_test.bar group by name")
+         '({:name "bob"} {:name "george"})))
+  (is (= (all-vals "select bar, foo from
+                      (select 1 as foo, 'hi' as bar union all
+                       select 2 as foo, 'why' as bar) as sub
+                      group by 2, bar")
+         '({:foo 1, :bar "hi"} {:foo 2, :bar "why"}))))
+
+(deftest order-by-test
+  (is (= (all-vals "select name from (select 'foo' as name
+                                         union all select 'bob' as name) as baz
+                              group by 1 order by 1")
+         '({:name "bob"} {:name "foo"})))
+  (is (= (all-vals "select name, id from
+                          (select 'foo' as name, 2 as id
+                             union all select 'foo' as name, 1 as id
+                             union all select 'bar' as name, 10 as id) as baz
+                     group by 1, 2 order by 1, 2")
+         '({:name "bar", :id 10} {:name "foo", :id 1} {:name "foo", :id 2}))))
+
+(deftest test-concat
+  (is (= (all-vals "select concat('ab', 'cd') as val")
+         [{:val "abcd"}])))
+
+(deftest test-upper-lower
+  (is (= (all-vals "select upper('cdAb') as val")
+         [{:val "CDAB"}]))
+  (is (= (all-vals "select lower('cDAb') as val")
+         [{:val "cdab"}])))
+
+

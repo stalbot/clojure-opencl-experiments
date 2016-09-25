@@ -296,11 +296,12 @@
         alias-name (:view-name alias-ctxt)
         [data-code data-ctxt] (visit [(first args) (assoc parse-context
                                                      :alias-name alias-name)])
-        data-ctxt (update data-ctxt :binding merge (:binding parse-context))]
+        data-ctxt (update data-ctxt :binding merge (:binding parse-context))
+        view-name (or alias-name (:view-name data-ctxt))]
 
-    (when-not (or alias-name (:view-name data-ctxt))
+    (when-not view-name
       (throw (RuntimeException. "TODO every derived table blah blah alias")))
-    [data-code data-ctxt]))
+    [data-code, (assoc data-ctxt :view-name view-name)]))
 
 (defmethod visit :ALIAS [[[_ & args] parse-context]]
   ; deliberately do not worry about \"s in the parse ->
@@ -340,7 +341,10 @@
                       :new-view-name (:view-name view-ctxt)
                       :new-data-sym new-data-sym
                       :join-strategy (-> by-key :JOIN_STRAT first (or :INNER))
-                      :join-direction (-> by-key :JOIN_DIRECTION first))
+                      :join-direction (-> by-key
+                                          :JOIN_DIRECTION
+                                          second
+                                          first))
 
         [on-code _] (visit [(:ON by-key) ctxt-for-on])
         on-code `(let [~new-data-sym ~view-code] ~on-code)]
@@ -353,18 +357,18 @@
     ; TODO: where the hell is `any?`
     (not (not-any?
            #(or (and (keyword? %) (re-find view-name-reg (name %)))
-                (and (seq? %) (form-contains-view-name? % view-name)))
+                (and (seq? %) (form-contains-view-name? % view-name-reg)))
            form))))
 
 (defn- subseq-vals [func]
   [#(reduce concat (vals (subseq %1 func %2))), true])
 
 (def supported-split-funcs
-  {`= [#(get %1 %2) false]
-   `> (subseq-vals >)
-   `>= (subseq-vals >=)
-   `< (subseq-vals <)
-   `<= (subseq-vals <=)})
+  {:= [`get false]
+   :> `(subseq-vals >)
+   :>= `(subseq-vals >=)
+   :< `(subseq-vals <)
+   :<= `(subseq-vals <=)})
 
 (defn split-on-code-across-join [expr-code joining-view-name]
   (if-not (= 3 (count expr-code))
@@ -372,10 +376,11 @@
     []
     (let [[func form1 form2] expr-code
           forms [form1 form2]
+          func-kw (-> func str (string/split #"/") last keyword)
           forms-with-views (map
                              #(form-contains-view-name? % joining-view-name)
                              forms)]
-      (if (or (not (contains? supported-split-funcs func))
+      (if (or (not (contains? supported-split-funcs func-kw))
               (every? true? forms-with-views))
         ; cannot split expression by views, screwed again
         ; TODO: this isn't quite right:
@@ -385,27 +390,27 @@
         ; many more TODOs here: support trees of ORs/ANDs with splittable
         ; leaf conditions, optimize the above example to be splittable, etc.
         []
-        [func forms (if (first forms-with-views) 1 0)]))))
+        [func-kw forms (if (first forms-with-views) 1 0)]))))
 
 
 (def func-swapper
   ; depending on who we're iterating over, will need to flip around the
   ; gt/lt -> this is 100% wrong I think, just need to remember to fix it
-  {`>= `<=
-   `> `<})
+  {:>= :<=
+   :> :<})
 
 
 (defn join-with-grouping
-  [func forms left-idx left-data-sym right-data-sym row-sym parse-context]
+  [func-kw forms left-idx left-data-sym right-data-sym row-sym parse-context]
   (let [[lform rform] (if (= left-idx 0) forms (reverse forms))
         [iter-sym lkup-sym] (map symbol ["iter-data" "lkup-data"])
         ; reiterating, have not thought through the below line at all
-        func (if (= left-idx 1) (get func-swapper func func) func)
-        [transformed-func sort-required] (get supported-split-funcs func)
+        func-kw (if (= left-idx 1) (get func-swapper func-kw func-kw) func-kw)
+        [transformed-func sort-required] (get supported-split-funcs func-kw)
         [ksym vsym rsym] (map symbol ["k" "v" "r"])
         inner-only? (nil? (:join-direction parse-context))
         ; if inner join, which one we iterate over doesn't really matter
-        vals-of-iters (if (= (:join-direction parse-context) :left)
+        vals-of-iters (if (= (:join-direction parse-context) :LEFT)
                         [left-data-sym right-data-sym]
                         [right-data-sym left-data-sym])]
 
@@ -419,7 +424,7 @@
        ; TODO: in a FULL OUTER join, will need to add in all grouped keys
        ; from lkup-sym that weren't in iter-sym
        (mapcat
-         (fn [~ksym ~vsym]
+         (fn [[~ksym ~vsym]]
            (mapcat
              (fn [~rsym]
                (or
@@ -438,7 +443,7 @@
   [expr-code left-data-sym right-data-sym row-sym parse-context]
   (let [inner-only? (nil? (:join-direction parse-context))
         ; if inner join, which one we iterate over doesn't really matter
-        [iter-sym other-sym] (if (= (:join-direction parse-context) :left)
+        [iter-sym other-sym] (if (= (:join-direction parse-context) :LEFT)
                                [left-data-sym right-data-sym]
                                [right-data-sym left-data-sym])]
     `(mapcat
@@ -613,6 +618,5 @@
       (println parsed)
       (throw (RuntimeException. "Bad parse")))
     (to-clojure-data (parser sql))))
-
 
 

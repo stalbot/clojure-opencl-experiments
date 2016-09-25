@@ -115,6 +115,20 @@
                                         on baz.name=bar.name")
          '({:baz.name "bob", :bar.name "bob"}
            {:baz.name "george", :bar.name "george"})))
+  (is (= (all-vals "select * from
+                      (select 1 as foo, 'hi' as bar union all
+                      select 3 as foo, 'hi' as bar union all
+                      select 6 as foo, 'not' as bar union all
+                       select 2 as foo, 'why' as bar) as sub
+                      left join
+                      (select 1 as foo, 'HI' as bar union all
+                       select 2 as foo, 'WHY' as bar) as other_sub
+                      on UPPER(sub.bar) = other_sub.bar
+                      order by 3")
+         '({:other_sub.foo 1, :other_sub.bar "HI", :sub.foo 1, :sub.bar "hi"}
+           {:other_sub.foo 2, :other_sub.bar "WHY", :sub.foo 2, :sub.bar "why"}
+           {:other_sub.foo 1, :other_sub.bar "HI", :sub.foo 3, :sub.bar "hi"}
+           {:other_sub.foo nil, :other_sub.bar nil, :sub.foo 6, :sub.bar "not"})))
   (is (= (all-vals "select right.foo, left.foo from (select 1 as id, 1 as foo) as right
                             left join (select 1 as id, 2 as foo) as left
                             on right.id = left.id")

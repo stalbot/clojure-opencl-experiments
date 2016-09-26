@@ -149,6 +149,7 @@
          '({:name "bob"} {:name "george"})))
   (is (= (all-vals "select bar, foo from
                       (select 1 as foo, 'hi' as bar union all
+                       select 1 as foo, 'hi' as bar union all
                        select 2 as foo, 'why' as bar) as sub
                       group by 2, bar")
          '({:foo 1, :bar "hi"} {:foo 2, :bar "why"}))))

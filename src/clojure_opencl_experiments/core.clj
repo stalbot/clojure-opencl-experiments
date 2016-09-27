@@ -1,10 +1,12 @@
 (ns clojure-opencl-experiments.core
   (:require [clojure-opencl-experiments.sql-functions :as sql-functions]
             [instaparse.core :as insta]
+            [clojurewerkz.buffy.core :as buf]
     ;[uncomplicate.clojurecl [core :refer :all]
     ; [info :refer :all]]
             [clojure.string :as str]
-            [clojure.string :as string])
+            [clojure.string :as string]
+            [clojure.set :as set])
   (:import (java.util.regex Pattern)))
 
 (def ^:const grammar-s
@@ -29,7 +31,7 @@
   (eval sql-as-clojure))
 
 (defn split-identifier [identifier]
-  (re-seq #"(?:\".*?\"|[^.\"]+)" identifier))
+  (re-seq #"(?:\".*?\"|[^.\"]+)" (name identifier)))
 
 (defn qualify-keys-for-view [view-name row]
   (persistent!
@@ -227,7 +229,7 @@
 (defn make-aggregator [ctxt]
   (let [[accum row] [(gensym) (gensym)]
 
-        ; total hacks to suppress arity warnings below
+        ; total hacks to suppress arity ide warnings below
         assoc! assoc!
         update update
 
@@ -329,7 +331,6 @@
         ~data-sym),
      new-context]))
 
-
 (defmethod visit :ON_JOIN [[[_ & args] parse-context]]
   (let [by-key (into {} (for [[key & _ :as node] args] [key node]))
         [view-code view-ctxt] (visit [(:VIEW by-key) parse-context])
@@ -337,7 +338,7 @@
         new-data-sym (symbol "new-data")
         ctxt-for-on (assoc view-ctxt
                       ; could probably just use :view-ctxt directly,
-                      ; but explicitlness better to avoid confusion later
+                      ; but explicitness better to avoid confusion later
                       :new-view-name (:view-name view-ctxt)
                       :new-data-sym new-data-sym
                       :join-strategy (-> by-key :JOIN_STRAT first (or :INNER))
@@ -350,15 +351,10 @@
         on-code `(let [~new-data-sym ~view-code] ~on-code)]
     [on-code, view-ctxt]))
 
-(defn- form-contains-view-name? [form view-name]
-  (let [view-name-reg (if (= (type view-name) Pattern)
-                        view-name
-                        (re-pattern (str "^" (name view-name) "\\.")))]
-    ; TODO: where the hell is `any?`
-    (not (not-any?
-           #(or (and (keyword? %) (re-find view-name-reg (name %)))
-                (and (seq? %) (form-contains-view-name? % view-name-reg)))
-           form))))
+(defn- form-only-has-view-name? [form view-name]
+  (let [views-used (-> form meta :views-used)]
+    ; this 'works' if views-used in nil -> should it?
+    (empty? (set/difference views-used #{view-name}))))
 
 (defn- subseq-vals [func]
   [#(reduce concat (vals (subseq %1 func %2))), true])
@@ -377,11 +373,11 @@
     (let [[func form1 form2] expr-code
           forms [form1 form2]
           func-kw (-> func str (string/split #"/") last keyword)
-          forms-with-views (map
-                             #(form-contains-view-name? % joining-view-name)
+          single-view-form (map
+                             #(form-only-has-view-name? % joining-view-name)
                              forms)]
       (if (or (not (contains? supported-split-funcs func-kw))
-              (every? true? forms-with-views))
+              (every? true? single-view-form))
         ; cannot split expression by views, screwed again
         ; TODO: this isn't quite right:
         ; "ON foo.bar + foo.baz = 2" aka
@@ -390,7 +386,7 @@
         ; many more TODOs here: support trees of ORs/ANDs with splittable
         ; leaf conditions, optimize the above example to be splittable, etc.
         []
-        [func-kw forms (if (first forms-with-views) 1 0)]))))
+        [func-kw forms (if (first single-view-form) 1 0)]))))
 
 
 (def func-swapper
@@ -488,10 +484,17 @@
 
 (defmethod visit :EXPRESSION [[[_ & args] parse-context]]
   (let [ctxt-for-child (assoc parse-context :context :expression)
-        [code ctxt] (visit [(first args) ctxt-for-child])]
+        [code ctxt] (visit [(first args) ctxt-for-child])
+
+        ; TODO: this may be a suboptimal way of passing around context
+        ; although, per comment below, if we do do this there's another
+        ; todo to add in the line numbers to the meta for more error reporting
+        views-used (:views-used ctxt)
+        code (if (and (coll? code) views-used)
+               (with-meta code {:views-used views-used})
+               code)]
     ; yeah, this should probably use the SQL like a real thing
     [code (update ctxt :field-name #(or % (gen-field-name)))]))
-
 
 (defmethod visit :FUNCTION_CALL [[[_ & args] parse-context]]
   (let [[func-code func-ctxt] (visit [(first args) parse-context])
@@ -581,13 +584,23 @@
               nil)))
         nil
         (range 0 (count elements)))
-      (throw (RuntimeException. "no such col")))))
+      (throw (RuntimeException. (format "no such col '%s'" field-name))))))
 
 (defmethod visit :IDENTIFIER [[[_ & args] parse-context]]
   (if (= (:context parse-context) :expression)
     (let [field-name (keyword (str/join "." args))
           row-sym (:row-sym parse-context)
           field-name-in-ctxt (fully-qualified-name field-name parse-context)
+
+          view-name (->> field-name-in-ctxt
+                         split-identifier
+                         (drop-last 1)
+                         (string/join ".")
+                         keyword)
+          parse-context (update parse-context
+                                :views-used
+                                #(conj (or % #{}) view-name))
+
           type (get-in parse-context [:binding field-name-in-ctxt])]
       [`(~field-name-in-ctxt ~row-sym)
        (assoc parse-context

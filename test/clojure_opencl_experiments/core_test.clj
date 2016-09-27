@@ -108,8 +108,6 @@
          '({:name "bob", :bar_child.value "bob_val"}
            {:name "george", :bar_child.value "george_val_1"}
            {:name "george", :bar_child.value "george_val_2"})))
-  ; TODO: note to self: problem here is with the join aliases,
-  ; need to inject the alias into the row keys/binding directly
   (is (= (all-vals "select baz.name, bar.name from memory_test.bar
                                     left join memory_test.bar as baz
                                         on baz.name=bar.name")
@@ -174,6 +172,8 @@
   (is (= (all-vals "select upper('cdAb') as val")
          [{:val "CDAB"}]))
   (is (= (all-vals "select lower('cDAb') as val")
-         [{:val "cdab"}])))
+         [{:val "cdab"}]))
+  (is (= (all-vals "select upper(lower('cDAb')) as val")
+         [{:val "CDAB"}])))
 
 

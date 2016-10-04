@@ -1,6 +1,7 @@
 (ns clojure-opencl-experiments.core-test
   (:require [clojure.test :refer :all]
             [clojure-opencl-experiments.core :refer :all]
+            [clojure-opencl-experiments.memory-test :refer :all]
             [clojure.string :as string]
             [criterium.core :refer [with-progress-reporting quick-bench]]))
 
@@ -174,6 +175,12 @@
                              union all select 'bar' as name, 10 as id) as baz
                      group by 1, 2 order by 1, 2")
          '({:name "bar", :id 10} {:name "foo", :id 1} {:name "foo", :id 2}))))
+
+(deftest test-limit
+  (is (= (all-vals "select id, value from memory_test.bar_child
+                             order by 2
+                             limit 2")
+         '({:id 1, :value "bob_val"} {:id 2, :value "george_val_1"}))))
 
 (deftest test-concat
   (is (= (all-vals "select concat('ab', 'cd') as val")

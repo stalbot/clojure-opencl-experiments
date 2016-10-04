@@ -1,13 +1,13 @@
 (ns clojure-opencl-experiments.core
   (:require [clojure-opencl-experiments.sql-functions :as sql-functions]
+            [clojure-opencl-experiments.memory-test :refer :all]
             [instaparse.core :as insta]
             [clojurewerkz.buffy.core :as buf]
     ;[uncomplicate.clojurecl [core :refer :all]
     ; [info :refer :all]]
             [clojure.string :as str]
             [clojure.string :as string]
-            [clojure.set :as set])
-  (:import (java.util.regex Pattern)))
+            [clojure.set :as set]))
 
 (def ^:const grammar-s
   (slurp "resources/grammar.txt"))
@@ -54,11 +54,9 @@
 
 (defmulti load-view :storage-type)
 
-(def memory-test-views (atom {}))
 (defmethod load-view :memory-test [{:keys [name view-name]}]
   (qualify-data-for-view view-name (get @memory-test-views name)))
 
-(def known-views (atom {}))
 (defn lookup-view [view-path]
   (get-in @known-views view-path))
 
@@ -292,7 +290,7 @@
         (let [[code _] (visit [arg ctxt-for-expr])]
           (if (integer? code)
             (let [kw-for-idx (get by-idx code)]
-              (if-not (nil? code)
+              (if-not (nil? kw-for-idx)
                 `(~kw-for-idx ~row-sym)
                 (throw
                   (RuntimeException. "TODO bad group idx"))))
@@ -322,7 +320,9 @@
     [`#(sort-by ~sorter-fn %)
      parse-context]))
 
-(defmethod visit :LIMIT [[[_ & args] parse-context]])
+(defmethod visit :LIMIT [[[_ & args] parse-context]]
+  (let [limit-num (first (visit [(first args) parse-context]))]
+    [`#(take ~limit-num %) parse-context]))
 
 (defmethod visit :VIEW [[[_ & args] parse-context]]
   (let [parse-context (assoc parse-context :context :from) ; TODO: or :view?

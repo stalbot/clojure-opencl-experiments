@@ -528,14 +528,8 @@
     ; yeah, this should probably use the SQL like a real thing
     [code (update ctxt :field-name #(or % (gen-field-name)))]))
 
-(defmethod visit :FUNCTION_CALL [[[_ & args] parse-context]]
-  (let [[func-code func-ctxt] (visit [(first args) parse-context])
-
-        arg-info (map #(visit [% parse-context]) (rest args))
-        arg-code (map first arg-info)
-        arg-ctxts (map second arg-info)
-
-        agg? (:agg? func-ctxt)
+(defn do-visit-function [func-code func-ctxt arg-code arg-ctxts]
+  (let [agg? (:agg? func-ctxt)
         tmp-dim-names (when agg?
                         (->> (repeatedly gensym)
                              (take (count arg-code))
@@ -556,15 +550,25 @@
 
         type (apply check-return-type!
                     (:function func-ctxt)
-                    (map :type arg-ctxts))]
-    (when (and agg? (some :agg? arg-ctxts))
-      (throw (RuntimeException. "TODO Can't nest aggregates")))
+                    (map :type arg-ctxts))
+        any-child-aggs? (some :agg? arg-ctxts)]
 
+    (when (and agg? any-child-aggs?)
+          (throw (RuntimeException. "TODO Can't nest aggregates")))
     [`(~func-code ~@arg-code),
      (assoc func-ctxt
        :type type
-       :agg-tmp-dims agg-tmp-dims
-       :agg-funcs agg-funcs)]))
+       :agg? (or agg? any-child-aggs?)
+       :agg-tmp-dims (concat agg-tmp-dims (mapcat :agg-tmp-dims arg-ctxts))
+       :agg-funcs (concat agg-funcs (mapcat :agg-funcs arg-ctxts)))]))
+
+(defmethod visit :FUNCTION_CALL [[[_ & args] parse-context]]
+  (let [[func-code func-ctxt] (visit [(first args) parse-context])
+
+        arg-info (map #(visit [% parse-context]) (rest args))
+        arg-code (map first arg-info)
+        arg-ctxts (map second arg-info)]
+    (do-visit-function func-code func-ctxt arg-code arg-ctxts)))
 
 (defmethod visit :FUNCTION [[[_ & args] parse-context]]
   (let [func-name-raw (first args)

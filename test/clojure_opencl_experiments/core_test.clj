@@ -152,6 +152,17 @@
                       group by 2, bar")
          '({:foo 1, :bar "hi"} {:foo 2, :bar "why"}))))
 
+(deftest group-by-with-aggs-test
+  (is (= (all-vals "select count(id) as c, bar_id
+                      from memory_test.bar_child group by 2")
+         [{:c 1, :bar_id 1} {:c 2, :bar_id 2}]))
+  (is (= (all-vals "select sum(id) as summy, bar_id
+                      from memory_test.bar_child group by 2")
+         [{:summy 1, :bar_id 1} {:summy 5, :bar_id 2}]))
+  (is (= (all-vals "select avg(id) as average, bar_id from
+                        memory_test.bar_child group by 2")
+         '({:average 1.0, :bar_id 1} {:average 2.5, :bar_id 2}))))
+
 (deftest order-by-test
   (is (= (all-vals "select name from (select 'foo' as name
                                          union all select 'bob' as name) as baz
@@ -175,5 +186,3 @@
          [{:val "cdab"}]))
   (is (= (all-vals "select upper(lower('cDAb')) as val")
          [{:val "CDAB"}])))
-
-

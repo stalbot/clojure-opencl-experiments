@@ -19,9 +19,16 @@
 (defn sql-average-finalizer [[sum-accum, count-accum]]
   (/ (double sum-accum) count-accum))
 
-(def aggregates #{:sum :avg :count})
+(defn noop [x] x)
 
-(def exportable [:concat :lower :upper])
+(defn zerof [& _] 0)
+(defn zerof2 [& _] [0 0])
+
+(def aggregates {:sum [`sql-sum `zerof `noop],
+                 :avg [`sql-average `zerof2 `sql-average-finalizer],
+                 :count [`sql-count `zerof `noop]})
+
+(def exportable [:concat :lower :upper :sum])
 
 (def func-lkup
   (into {}

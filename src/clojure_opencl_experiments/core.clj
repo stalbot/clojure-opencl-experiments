@@ -50,6 +50,8 @@
       #(qualify-keys-for-view view-name %)
       data)))
 
+(def ^:constant agg-row-sym (symbol "agg-row"))
+
 (defmulti load-view :storage-type)
 
 (def memory-test-views (atom {}))
@@ -93,6 +95,7 @@
         bound-context (assoc parse-context
                         :binding new-binding
                         :field-idx-lkup (:field-idx-lkup field-context))
+        bound-context (merge field-context bound-context)
 
         code (reduce
                (fn [code key]
@@ -144,6 +147,11 @@
      :/ number-type-lkup
      :- number-type-lkup
 
+     :sum #(when (and (= (count %) 1) (#{:integer :float} (first %)))
+            (first %))
+     :avg #(when (#{:integer :float} (first %)) :float)
+     :count (fn [& _] :integer) ; any combo of columns can be counted
+
      :concat (fn [args]
                (when (and (>= (count args) 2) (every? #{:string} args))
                  :string))
@@ -174,11 +182,23 @@
         visited-globs (mapcat #(visit [% ctxt-with-row]) GLOB)
         visited-fields (map #(visit [% ctxt-with-row]) FIELD)
         all-new-fields (concat visited-globs visited-fields)
-        selected-field-code (into {}
-                                  (map
-                                    (fn [[code ctxt]]
-                                      [(:field-name ctxt) code])
-                                    all-new-fields))
+
+        agg-tmp-dims (mapcat #(-> % second :agg-tmp-dims) all-new-fields)
+        aggs-and-dims (group-by #(-> % second :agg? boolean) all-new-fields)
+        agg-funcs (mapcat #(-> % second :agg-funcs) all-new-fields)
+
+        all-dims (concat
+                   agg-tmp-dims
+                   (map
+                     (fn [[code ctxt]]
+                       [(:field-name ctxt) code])
+                     (get aggs-and-dims false)))
+        agg-cols (map
+                   (fn [[code ctxt]]
+                     [(:field-name ctxt) code])
+                   (get aggs-and-dims true))
+
+        selected-field-code (into {} all-dims)
         code `(fn [~row-sym] ~selected-field-code)
 
         field-idx-lkup (into
@@ -194,7 +214,9 @@
                             all-new-fields))]
     [code, (assoc parse-context
              :binding new-binding
-             :field-idx-lkup field-idx-lkup)]))
+             :field-idx-lkup field-idx-lkup
+             :agg-cols agg-cols
+             :agg-funcs agg-funcs)]))
 
 (defmethod visit :FROM [[[_ & args] parse-context]]
   (let [parse-context (assoc parse-context :context :from)]
@@ -224,35 +246,43 @@
                                     :type field-type)])
       (filter #(re-find qualification-reg (name (first %))) binding))))
 
-(defn noop [x] x)
 
-(defn make-aggregator [ctxt]
+(defrecord AggFunctionInst [init-func, incr-func, agg-col, agg-tmp-dims])
+
+
+(defn make-aggregator [ctxt group-cols]
   (let [[accum row] [(gensym) (gensym)]
 
-        ; total hacks to suppress arity ide warnings below
+        ; total hack to suppress arity ide warnings below
         assoc! assoc!
-        update update
 
-        updates (map (fn [[agg-col agg-func _ agg-tmp-dims]]
-                       (let [agg-func-args (map (fn [dim] `(~dim ~row))
-                                                agg-tmp-dims)]
-                         `(assoc! ~agg-col (~agg-func
-                                             (~agg-col ~accum)
-                                             ~@agg-func-args))))
-                     (:agg-colls ctxt))
-        finishers (map (fn [[agg-col _ agg-finisher _]]
-                         `(update ~agg-col
-                                  ~(or agg-finisher (resolve 'noop))))
-                       (:agg-colls ctxt))]
-    `#(->
-       (reduce
-         (fn [~accum ~row]
-           (-> ~accum
-               ~@updates))
-         (transient (first %))
-         (rest %))
-       persistent!
-       ~@finishers)))
+        agg-funcs (:agg-funcs ctxt)
+        inititializer (into {}
+                        (map
+                          (fn [{:keys [init-func agg-col]}]
+                            [agg-col `(~init-func)])
+                          agg-funcs))
+        updates (map
+                  (fn [{:keys [incr-func agg-col agg-tmp-dims]}]
+                    (let [agg-func-args (map (fn [dim] `(~dim ~row))
+                                             agg-tmp-dims)]
+                      `(assoc! ~agg-col (~incr-func
+                                          (~agg-col ~accum)
+                                          ~@agg-func-args))))
+                  agg-funcs)
+        final-row (into {} (:agg-cols ctxt))]
+     `(fn [grouped-rows#]
+        (let [first-row# (first grouped-rows#)
+              grouped-kvs# (select-keys first-row# ~group-cols)
+              ~agg-row-sym (reduce
+                             (fn [~accum ~row]
+                               (-> ~accum
+                                   ~@updates))
+                             (transient ~inititializer)
+                             grouped-rows#)
+              ~agg-row-sym (persistent! ~agg-row-sym)]
+         (merge ~final-row grouped-kvs#)))))
+
 
 (defn vec-for-grouping [row-sym args parse-context]
   (let [by-idx (:field-idx-lkup parse-context)
@@ -272,8 +302,10 @@
 (defmethod visit :GROUP_BY [[[_ & args] parse-context]]
   (let [row-sym (gensym)
         group-vec (vec-for-grouping row-sym args parse-context)
+        ; a bit of an abuse of what this vector was intended for
+        group-col-keys (mapv first group-vec)
 
-        aggregator (make-aggregator parse-context)
+        aggregator (make-aggregator parse-context group-col-keys)
         grouping-fn `(fn [~row-sym] ~group-vec)]
     ; TODO: barf if there are any ungrouped non-aggregates
     [`#(->>
@@ -498,24 +530,59 @@
 
 (defmethod visit :FUNCTION_CALL [[[_ & args] parse-context]]
   (let [[func-code func-ctxt] (visit [(first args) parse-context])
+
         arg-info (map #(visit [% parse-context]) (rest args))
         arg-code (map first arg-info)
+        arg-ctxts (map second arg-info)
+
+        agg? (:agg? func-ctxt)
+        tmp-dim-names (when agg?
+                        (->> (repeatedly gensym)
+                             (take (count arg-code))
+                             (map str)
+                             (map keyword)))
+        agg-col-name (-> (gensym) str keyword)
+        agg-tmp-dims (when tmp-dim-names
+                       (map vector tmp-dim-names arg-code))
+        agg-funcs (when tmp-dim-names
+                    [(->AggFunctionInst
+                       (:agg-init-func func-ctxt)
+                       (:agg-incr-func func-ctxt)
+                       agg-col-name
+                       tmp-dim-names)])
+        arg-code (if tmp-dim-names
+                   [`(~agg-col-name ~agg-row-sym)]
+                   arg-code)
+
         type (apply check-return-type!
                     (:function func-ctxt)
-                    (map #(-> % second :type) arg-info))]
+                    (map :type arg-ctxts))]
+    (when (and agg? (some :agg? arg-ctxts))
+      (throw (RuntimeException. "TODO Can't nest aggregates")))
 
     [`(~func-code ~@arg-code),
      (assoc func-ctxt
-       :type type)]))
+       :type type
+       :agg-tmp-dims agg-tmp-dims
+       :agg-funcs agg-funcs)]))
 
 (defmethod visit :FUNCTION [[[_ & args] parse-context]]
   (let [func-name-raw (first args)
         func-name (keyword (string/lower-case func-name-raw))
-        func-sym (get sql-functions/func-lkup func-name)]
+        agg? (contains? sql-functions/aggregates func-name)
+        [agg-incr-func agg-init-func func-sym]
+        (if agg?
+          (get sql-functions/aggregates func-name)
+          [nil, nil, (get sql-functions/func-lkup func-name)])]
+
     (when-not func-sym
       (throw (RuntimeException.
                (format "Unknown function '%s'" func-name-raw))))
-    [func-sym (assoc parse-context :function func-name)]))
+    [func-sym (assoc parse-context
+                :function func-name
+                :agg? (boolean agg-init-func)
+                :agg-init-func agg-init-func
+                :agg-incr-func agg-incr-func)]))
 
 (defmethod visit :BIN_OP_CALL [[[_ & args] parse-context]]
   (let [visit #(visit [% parse-context])

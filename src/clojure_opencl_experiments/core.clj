@@ -590,12 +590,8 @@
 
 (defmethod visit :BIN_OP_CALL [[[_ & args] parse-context]]
   (let [visit #(visit [% parse-context])
-        [[e1 e1-ctxt] [op op-ctxt] [e2 e2-ctxt]] (map visit args)
-        ret-type (check-return-type!
-                   (:function op-ctxt)
-                   (:type e1-ctxt)
-                   (:type e2-ctxt))]
-    [`(~op ~e1 ~e2), (assoc parse-context :type ret-type)]))
+        [[e1 e1-ctxt] [op op-ctxt] [e2 e2-ctxt]] (map visit args)]
+    (do-visit-function op op-ctxt [e1 e2] [e1-ctxt e2-ctxt])))
 
 (defmethod visit :BIN_OP [[[_ & args] parse-context]]
   (let [func-string (str/lower-case (first args))

@@ -160,6 +160,15 @@
   (is (= (all-vals "select sum(id) as summy, bar_id
                       from memory_test.bar_child group by 2")
          [{:summy 1, :bar_id 1} {:summy 5, :bar_id 2}]))
+  (is (= (all-vals "select sum(bar_id) + 100 as summy, bar_id
+                        from memory_test.bar_child
+                        group by 2")
+         '({:summy 101, :bar_id 1} {:summy 104, :bar_id 2})))
+  (is (= (all-vals "select sum(bar_id) + count(value) as count_summy,
+                           bar_id
+                        from memory_test.bar_child
+                        group by 2")
+         '({:count_summy 2, :bar_id 1} {:count_summy 6, :bar_id 2})))
   (is (= (all-vals "select avg(id) as average, bar_id from
                         memory_test.bar_child group by 2")
          '({:average 1.0, :bar_id 1} {:average 2.5, :bar_id 2}))))

@@ -30,6 +30,43 @@
   ; have to evaluate in this ns
   (eval sql-as-clojure))
 
+(defrecord AggFunctionInst [init-func, incr-func, agg-col, agg-tmp-dims])
+
+(def ^:constant agg-row-sym (symbol "agg-row"))
+
+(defn make-aggregator [ctxt group-cols]
+  (let [[accum row] [(gensym) (gensym)]
+
+        ; total hack to suppress arity ide warnings below
+        assoc! assoc!
+
+        agg-funcs (:agg-funcs ctxt)
+        inititializer (into {}
+                            (map
+                              (fn [{:keys [init-func agg-col]}]
+                                [agg-col `(~init-func)])
+                              agg-funcs))
+        updates (map
+                  (fn [{:keys [incr-func agg-col agg-tmp-dims]}]
+                    (let [agg-func-args (map (fn [dim] `(~dim ~row))
+                                             agg-tmp-dims)]
+                      `(assoc! ~agg-col (~incr-func
+                                          (~agg-col ~accum)
+                                          ~@agg-func-args))))
+                  agg-funcs)
+        final-row (into {} (:agg-cols ctxt))]
+    `(fn [grouped-rows#]
+       (let [first-row# (first grouped-rows#)
+             grouped-kvs# (select-keys first-row# ~group-cols)
+             ~agg-row-sym (reduce
+                            (fn [~accum ~row]
+                              (-> ~accum
+                                  ~@updates))
+                            (transient ~inititializer)
+                            grouped-rows#)
+             ~agg-row-sym (persistent! ~agg-row-sym)]
+         (merge ~final-row grouped-kvs#)))))
+
 (defn split-identifier [identifier]
   (re-seq #"(?:\".*?\"|[^.\"]+)" (name identifier)))
 
@@ -49,8 +86,6 @@
     (mapv
       #(qualify-keys-for-view view-name %)
       data)))
-
-(def ^:constant agg-row-sym (symbol "agg-row"))
 
 (defmulti load-view :storage-type)
 
@@ -72,6 +107,20 @@
 
 (defmethod visit :SELECT [[[_ & args] parse-context]]
   (visit [(first args) parse-context]))
+
+(defn do-ungrouped-agg [code, bound-context]
+  (let [unagged (->> bound-context
+                     :agg-cols
+                     (map first)
+                     set
+                     (set/difference
+                       (set (keys (:binding bound-context))))
+                     not-empty)]
+    (when unagged
+      (throw (RuntimeException. (str "Fields ("
+                                     (string/join ", " unagged)
+                                     ") must be grouped or aggregated")))))
+  [`(~(make-aggregator bound-context []), ~code)])
 
 (defmethod visit :SELECT_ [[[_ & args] parse-context]]
   (let [parse-context (assoc parse-context
@@ -101,7 +150,10 @@
                        (visit [(get by-key key) bound-context])]
                    (if transform-func
                      `(~transform-func ~code)
-                     code)))
+                     (if (and (= key :GROUP_BY)
+                              (not-empty (:agg-cols bound-context)))
+                       (do-ungrouped-agg code bound-context)
+                       code))))
                code
                [:GROUP_BY, :ORDER_BY, :LIMIT])
         code (if alias-name
@@ -245,43 +297,6 @@
       (filter #(re-find qualification-reg (name (first %))) binding))))
 
 
-(defrecord AggFunctionInst [init-func, incr-func, agg-col, agg-tmp-dims])
-
-
-(defn make-aggregator [ctxt group-cols]
-  (let [[accum row] [(gensym) (gensym)]
-
-        ; total hack to suppress arity ide warnings below
-        assoc! assoc!
-
-        agg-funcs (:agg-funcs ctxt)
-        inititializer (into {}
-                        (map
-                          (fn [{:keys [init-func agg-col]}]
-                            [agg-col `(~init-func)])
-                          agg-funcs))
-        updates (map
-                  (fn [{:keys [incr-func agg-col agg-tmp-dims]}]
-                    (let [agg-func-args (map (fn [dim] `(~dim ~row))
-                                             agg-tmp-dims)]
-                      `(assoc! ~agg-col (~incr-func
-                                          (~agg-col ~accum)
-                                          ~@agg-func-args))))
-                  agg-funcs)
-        final-row (into {} (:agg-cols ctxt))]
-     `(fn [grouped-rows#]
-        (let [first-row# (first grouped-rows#)
-              grouped-kvs# (select-keys first-row# ~group-cols)
-              ~agg-row-sym (reduce
-                             (fn [~accum ~row]
-                               (-> ~accum
-                                   ~@updates))
-                             (transient ~inititializer)
-                             grouped-rows#)
-              ~agg-row-sym (persistent! ~agg-row-sym)]
-         (merge ~final-row grouped-kvs#)))))
-
-
 (defn vec-for-grouping [row-sym args parse-context]
   (let [by-idx (:field-idx-lkup parse-context)
         ctxt-for-expr (assoc parse-context :row-sym row-sym)]
@@ -304,8 +319,19 @@
         group-col-keys (mapv first group-vec)
 
         aggregator (make-aggregator parse-context group-col-keys)
-        grouping-fn `(fn [~row-sym] ~group-vec)]
-    ; TODO: barf if there are any ungrouped non-aggregates
+        grouping-fn `(fn [~row-sym] ~group-vec)
+        ungrouped-unagged (-> (:binding parse-context)
+                              keys
+                              set
+                              (set/difference
+                                (set (map first (:agg-cols parse-context)))
+                                (set group-col-keys))
+                              not-empty)]
+
+    (when ungrouped-unagged
+      (throw (RuntimeException. (str "Fields ("
+                                     (string/join " " ungrouped-unagged)
+                                     ") must be grouped or aggregated."))))
     [`#(->>
         %
         (group-by ~grouping-fn)

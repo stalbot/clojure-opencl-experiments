@@ -173,6 +173,16 @@
                         memory_test.bar_child group by 2")
          '({:average 1.0, :bar_id 1} {:average 2.5, :bar_id 2}))))
 
+(deftest raw-aggs-test
+  (is (= (all-vals "select sum(id) as whatever
+                     from memory_test.bar_child")
+         [{:whatever 6}]))
+  (is (= (all-vals "select count(id) as whatever
+                       from memory_test.bar_child
+                       order by whatever
+                       limit 1")
+         [{:whatever 3}])))
+
 (deftest order-by-test
   (is (= (all-vals "select name from (select 'foo' as name
                                          union all select 'bob' as name) as baz

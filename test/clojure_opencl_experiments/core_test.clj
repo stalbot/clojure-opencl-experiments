@@ -181,7 +181,10 @@
                        from memory_test.bar_child
                        order by whatever
                        limit 1")
-         [{:whatever 3}])))
+         [{:whatever 3}]))
+  (is (= (all-vals "select sum(id * 10 + 3) / (avg(id + 2) - 1) as meaningless
+                      from memory_test.bar_child")
+         [{:meaningless 23.0}])))
 
 (deftest order-by-test
   (is (= (all-vals "select name from (select 'foo' as name

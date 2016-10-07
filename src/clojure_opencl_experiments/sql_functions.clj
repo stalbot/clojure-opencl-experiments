@@ -1,11 +1,34 @@
 (ns clojure-opencl-experiments.sql-functions
   (:require [clojure.string :as string]))
 
-(defn sql-concat [& args]
-  (string/join "" args))
+(defmacro allow-nulls [func]
+  (let [func-arglists (-> func
+                          resolve
+                          meta
+                          :arglists)
+        forms (map (fn [arglist]
+                     (if (some #{'&} arglist)
+                       `(~arglist
+                          (if (or
+                                (or ~@(map (fn [a] `(nil? ~a))
+                                           (drop-last 2 arglist)))
+                                (some nil? ~(last arglist)))
+                            nil
+                            (apply ~func ~@(conj (drop-last 2 arglist)
+                                                 (last arglist)))))
+                       `(~arglist
+                          (if (or ~@(map (fn [a] `(nil? ~a)) arglist))
+                            nil
+                            (~func ~@arglist)))))
+                   func-arglists)]
+    `(fn ~@forms)))
 
-(def sql-lower string/lower-case)
-(def sql-upper string/upper-case)
+
+(defn sql-concat [& args]
+  (if (some nil? args) nil (string/join "" args)))
+
+(def sql-lower (allow-nulls string/lower-case))
+(def sql-upper (allow-nulls string/upper-case))
 
 (defn sql-count [accum & row-vals]
   (+ accum (if (not-every? nil? row-vals) 1 0)))

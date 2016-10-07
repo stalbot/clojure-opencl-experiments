@@ -2,9 +2,8 @@
   (:require [clojure-opencl-experiments.sql-functions :as sql-functions]
             [clojure-opencl-experiments.memory-test :refer :all]
             [instaparse.core :as insta]
-            [clojurewerkz.buffy.core :as buf]
+            ;[clojurewerkz.buffy.core :as buf]
     ;[uncomplicate.clojurecl [core :refer :all]
-    ; [info :refer :all]]
             [clojure.string :as str]
             [clojure.string :as string]
             [clojure.set :as set]))
@@ -131,6 +130,9 @@
         [from-code from-context] (visit [(:FROM by-key) parse-context])
         bound-context from-context
 
+        [where-code _] (visit [(:WHERE by-key) from-context])
+        code (if where-code `(~where-code ~from-code) from-code)
+
         [field-code field-context] (visit [(:FIELD_LIST by-key) bound-context])
 
         new-binding (:binding field-context)
@@ -138,7 +140,7 @@
         new-binding (if alias-name
                       (qualify-keys-for-view alias-name new-binding)
                       new-binding)
-        code `(map ~field-code ~(or from-code [{}]))
+        code `(map ~field-code ~(or code [{}]))
         bound-context (assoc parse-context
                         :binding new-binding
                         :field-idx-lkup (:field-idx-lkup field-context))
@@ -271,6 +273,15 @@
 (defmethod visit :FROM [[[_ & args] parse-context]]
   (let [parse-context (assoc parse-context :context :from)]
     (visit [(first args) parse-context])))
+
+(defmethod visit :WHERE [[[_ & args] parse-context]]
+  (let [row-sym (gensym)
+        parse-context (assoc parse-context :row-sym row-sym)
+        [expr-code expr-ctxt] (visit [(first args) parse-context])]
+    (when-not (= (:type expr-ctxt) :bool)
+      (throw (RuntimeException. "Must have boolean in WHERE clause")))
+    [`(fn [rows#] (filter #(let [~row-sym %] ~expr-code) rows#)),
+     expr-ctxt]))
 
 (defmethod visit :FIELD [[[_ & args] parse-context]]
   (let [visit #(visit [% parse-context])

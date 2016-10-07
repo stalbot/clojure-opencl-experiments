@@ -133,6 +133,18 @@
                             on right.id = left.id")
          '({:right.foo 1, :left.foo 2}))))
 
+(deftest test-where
+  (is (= (all-vals "select name from memory_test.bar where id < 2")
+         [{:name "bob"}]))
+  (is (= (all-vals "select count(id) as c from memory_test.bar where id = 2")
+         [{:c 1}]))
+  (is (= (all-vals "select name, bar_child.value
+                      from memory_test.bar_child
+                      join memory_test.bar on bar_id=bar.id
+                      where name='george'")
+         '({:name "george", :bar_child.value "george_val_1"}
+           {:name "george", :bar_child.value "george_val_2"}))))
+
 (deftest test-union-all
   (is (= (all-vals "select 1 as foo union all select 2 as foo")
          '({:foo 1} {:foo 2})))

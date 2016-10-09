@@ -213,7 +213,10 @@
 (defn check-return-type! [func & arg-types]
   (let [type-val-getter (get func-type-lookup func)
         return-type (if type-val-getter
-                      (or (get type-val-getter arg-types)
+                      ; if any literal NULLs in argument, just return NULL
+                      ; TODO: this obviously not great
+                      (or (some #{:null} arg-types)
+                          (get type-val-getter arg-types)
                           (type-val-getter arg-types)))]
     (if return-type
       return-type

@@ -225,5 +225,7 @@
          [{:val "CDAB"}]))
   (is (= (all-vals "select lower('cDAb') as val")
          [{:val "cdab"}]))
+  (is (= (all-vals "select lower(NULL) as val")
+         [{:val nil}]))
   (is (= (all-vals "select upper(lower('cDAb')) as val")
          [{:val "CDAB"}])))

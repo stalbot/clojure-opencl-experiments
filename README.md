@@ -1,14 +1,1 @@
-# clojure_opencl_experiments
-
-A Clojure library designed to ... well, that part is up to you.
-
-## Usage
-
-FIXME
-
-## License
-
-Copyright © 2016 FIXME
-
-Distributed under the Eclipse Public License either version 1.0 or (at
-your option) any later version.
+Playing around with a SQL db in clojure that I had intended to make massivey parallel via opencl and didn't. Fun learnings had though...
